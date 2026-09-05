@@ -1,0 +1,2 @@
+# Optional local analysis stack; install only when a workflow requires transcription.
+faster-whisper>=1.1,<2
