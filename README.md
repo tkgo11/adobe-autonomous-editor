@@ -26,10 +26,12 @@ Restart Codex (or start a fresh session), then invoke:
 $adobe-autonomous-editor
 ```
 
+You only need to provide the footage/assets and the result you want. The skill already defines autonomous Premiere Pro / After Effects operation, rendering, QC, repair, and delivery behavior.
+
 Example:
 
 ```text
-$adobe-autonomous-editor Use D:\Footage\shoot and create a polished 60-second vertical product video. Handle Premiere Pro and After Effects autonomously, render, inspect, repair, and deliver the final result.
+$adobe-autonomous-editor Use D:\Footage\shoot to create a polished 60-second vertical product video.
 ```
 
 For project-only installation, manual Git installation, updates, uninstalling, verification, macOS/Linux skill discovery, and troubleshooting, see **[INSTALL.md](INSTALL.md)**.
