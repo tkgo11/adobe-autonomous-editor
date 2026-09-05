@@ -1,0 +1,4 @@
+interface:
+  display_name: "Adobe Autonomous Editor"
+  short_description: "Autonomous Premiere Pro and After Effects editing"
+  default_prompt: "Use $adobe-autonomous-editor to turn my footage and brief into a finished Premiere Pro / After Effects edit, initialize the environment, execute the edit, render, inspect, repair, and deliver without asking me to operate Adobe unless an external permission or license blocker requires it."
