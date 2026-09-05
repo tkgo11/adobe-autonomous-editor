@@ -4,6 +4,38 @@ A high-autonomy Agent Skill plus executable local runtime for turning **footage/
 
 The design target is: **the user supplies media and requirements; the agent operates the editors.** It does not promise to bypass Adobe licensing, UAC/admin consent, third-party purchases, or other external permission boundaries. Once those prerequisites exist, routine editing should require no manual timeline operation by the user.
 
+## Quick install — Codex on Windows
+
+This repository is itself the installable skill directory. Install the **whole repository**; do not copy only `SKILL.md`, because the skill uses the bundled `runtime/`, `scripts/`, `workflows/`, `templates/`, schemas, references, and internal initialize skill.
+
+```powershell
+$installer = Join-Path $env:TEMP "install-adobe-autonomous-editor.ps1"
+Invoke-WebRequest "https://raw.githubusercontent.com/tkgo11/adobe-autonomous-editor/main/install.ps1" -OutFile $installer
+& $installer
+```
+
+The default destination is:
+
+```text
+%USERPROFILE%\.agents\skills\adobe-autonomous-editor\
+```
+
+Restart Codex (or start a fresh session), then invoke:
+
+```text
+$adobe-autonomous-editor
+```
+
+Example:
+
+```text
+$adobe-autonomous-editor Use D:\Footage\shoot and create a polished 60-second vertical product video. Handle Premiere Pro and After Effects autonomously, render, inspect, repair, and deliver the final result.
+```
+
+For project-only installation, manual Git installation, updates, uninstalling, verification, macOS/Linux skill discovery, and troubleshooting, see **[INSTALL.md](INSTALL.md)**.
+
+The package also includes `agents/openai.yaml`, so Codex can show a human-friendly skill name, description, and default invocation prompt.
+
 ## Architecture
 
 The package now has four layers:
