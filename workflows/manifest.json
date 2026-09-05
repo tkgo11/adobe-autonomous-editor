@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "primary_workflows": [
+    {
+      "id": "talking-head",
+      "file": "talking-head.md",
+      "signals": ["talking head", "presenter", "commentary", "lecture", "testimonial", "single speaker"]
+    },
+    {
+      "id": "short-form-vertical",
+      "file": "short-form-vertical.md",
+      "signals": ["shorts", "reels", "tiktok", "vertical", "9:16", "short-form"]
+    },
+    {
+      "id": "youtube-longform",
+      "file": "youtube-longform.md",
+      "signals": ["youtube", "long-form", "essay", "review", "documentary", "explainer"]
+    },
+    {
+      "id": "interview-podcast",
+      "file": "interview-podcast.md",
+      "signals": ["interview", "podcast", "panel", "roundtable", "conversation", "multiple speakers"]
+    },
+    {
+      "id": "tutorial-screencast",
+      "file": "tutorial-screencast.md",
+      "signals": ["tutorial", "screencast", "screen recording", "software demo", "walkthrough", "course"]
+    },
+    {
+      "id": "event-highlight",
+      "file": "event-highlight.md",
+      "signals": ["event", "wedding", "travel", "sports highlight", "concert", "montage", "recap"]
+    },
+    {
+      "id": "commercial-product-ad",
+      "file": "commercial-product-ad.md",
+      "signals": ["commercial", "ad", "advertisement", "product promo", "paid social", "brand spot", "cta"]
+    },
+    {
+      "id": "repurpose-master-to-social",
+      "file": "repurpose-master-to-social.md",
+      "signals": ["repurpose", "clips", "cutdowns", "social clips", "multiple shorts", "from podcast", "from webinar"]
+    }
+  ],
+  "overlay_workflows": [
+    {
+      "id": "captions-localization",
+      "file": "captions-localization.md",
+      "signals": ["caption", "subtitle", "srt", "vtt", "translate", "localize", "burned-in captions"]
+    },
+    {
+      "id": "multicam-sync",
+      "file": "multicam-sync.md",
+      "signals": ["multicam", "multiple cameras", "external audio", "sync", "timecode", "camera angles"]
+    }
+  ]
+}

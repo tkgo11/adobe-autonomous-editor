@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/adobe-autonomous-editor/edit_job.schema.json",
+  "title": "Adobe Autonomous Editor Job",
+  "type": "object",
+  "required": [
+    "job_id",
+    "sources",
+    "brief"
+  ],
+  "properties": {
+    "job_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "brief": {
+      "type": "string",
+      "minLength": 1
+    },
+    "output_dir": {
+      "type": "string"
+    },
+    "delivery": {
+      "type": "object",
+      "properties": {
+        "aspect_ratio": {
+          "type": "string"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "fps": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "target_duration_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "codec": {
+          "type": "string"
+        },
+        "container": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "privacy": {
+      "type": "object",
+      "properties": {
+        "allow_cloud_media_upload": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": true
+    },
+    "requirements": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "properties": {
+        "primary": {
+          "type": "string"
+        },
+        "overlays": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "auto_select": {
+          "type": "boolean",
+          "default": true
+        },
+        "supporting": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Autonomous Adobe Execution Plan",
+  "type": "object",
+  "required": [
+    "actions"
+  ],
+  "properties": {
+    "report": {
+      "type": "string"
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "engine"
+        ],
+        "properties": {
+          "engine": {
+            "enum": [
+              "premiere",
+              "after_effects",
+              "desktop",
+              "qc",
+              "shell",
+              "review",
+              "analysis",
+              "transcribe"
+            ]
+          },
+          "op": {
+            "type": "string"
+          },
+          "args": {
+            "type": "object"
+          },
+          "actions": {
+            "type": "array"
+          },
+          "steps": {
+            "type": "array"
+          },
+          "continueOnError": {
+            "type": "boolean"
+          },
+          "timeout": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "retries": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10
+          },
+          "retryDelay": {
+            "type": "number",
+            "minimum": 0
+          },
+          "verify": {
+            "oneOf": [
+              {
+                "type": "object"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              }
+            ]
+          },
+          "fallbacks": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "maxItems": 8
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": false
+}

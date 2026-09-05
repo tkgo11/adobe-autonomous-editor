@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "internal_skills": [
+    {
+      "id": "initialize",
+      "name": "adobe-autonomous-editor-initialize",
+      "file": "initialize/SKILL.md",
+      "required": true,
+      "run": "before-workflow-routing",
+      "rerun_on": [
+        "adobe-host-restart",
+        "adobe-version-change",
+        "bridge-failure",
+        "capability-mismatch",
+        "environment-change",
+        "job-recovery"
+      ]
+    }
+  ]
+}
