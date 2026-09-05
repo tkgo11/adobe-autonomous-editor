@@ -55,7 +55,7 @@ $metadataFile = Join-Path $destination "agents\openai.yaml"
 if (-not (Test-Path -LiteralPath $skillFile)) { throw "Install verification failed: SKILL.md is missing." }
 if (-not (Test-Path -LiteralPath $metadataFile)) { throw "Install verification failed: agents/openai.yaml is missing." }
 
-$firstLines = Get-Content -LiteralPath $skillFile -TotalCount 5 -Raw
+$firstLines = (Get-Content -LiteralPath $skillFile -TotalCount 5) -join "`n"
 if ($firstLines -notmatch "(?m)^name:\s*adobe-autonomous-editor\s*$") {
   throw "Install verification failed: SKILL.md frontmatter name is invalid."
 }
