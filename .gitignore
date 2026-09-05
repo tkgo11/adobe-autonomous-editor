@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Temporary / backup files
+*.bak
+*.pre-modular.md
+*.log
+
+# Local runtime state and secrets
+.env
+runtime/bridge-secret.txt
+**/bridge-secret.txt
+*.ccx
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
