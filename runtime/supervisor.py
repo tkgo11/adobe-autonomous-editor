@@ -17,39 +17,14 @@ import sys
 import time
 from pathlib import Path
 
+from broker_util import read_json, start_broker
 from rpc_client import call
-
-
-def read_json(path: Path, default=None):
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {} if default is None else default
 
 
 def append_event(path: Path, event: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
-
-
-def start_broker(skill: Path, job: Path) -> subprocess.Popen:
-    secret_file = job / "runtime/bridge-secret.txt"
-    state = job / "runtime/broker-state.json"
-    log_path = job / "logs/broker.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log = log_path.open("a", encoding="utf-8")
-    kwargs = {}
-    if platform.system() == "Windows":
-        kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    proc = subprocess.Popen(
-        [sys.executable, str(skill / "runtime/orchestrator.py"), "--secret-file", str(secret_file), "--state", str(state)],
-        stdout=log,
-        stderr=log,
-        **kwargs,
-    )
-    (job / "runtime/broker.pid").write_text(str(proc.pid), encoding="utf-8")
-    return proc
 
 
 def launch_premiere(exe: str | None):
@@ -89,7 +64,10 @@ def main():
 
     job = Path(ns.job_root).resolve()
     skill = Path(ns.skill_root).resolve()
-    secret = (job / "runtime/bridge-secret.txt").read_text(encoding="utf-8").strip()
+    try:
+        secret = (job / "runtime/bridge-secret.txt").read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise SystemExit(f"Cannot read bridge secret (run initialize first): {exc}")
     env = read_json(job / "analysis/environment.json", {})
     premiere = (env.get("tools") or {}).get("premiere")
     events = job / "logs/supervisor-events.jsonl"
@@ -99,6 +77,17 @@ def main():
     premiere_launches = 0
     started = time.time()
     last_launch = 0.0
+    last_event_sig = None
+
+    def emit(event):
+        # Repeating an identical terminal/warning event every tick would grow the
+        # events file without bound; log transitions and retries, not steady state.
+        nonlocal last_event_sig
+        sig = (event.get("event"), event.get("error"), event.get("attempt"))
+        if sig == last_event_sig:
+            return
+        append_event(events, event)
+        last_event_sig = sig
 
     while True:
         now = time.time()
@@ -111,24 +100,26 @@ def main():
             if broker_restarts < ns.max_restarts:
                 proc = start_broker(skill, job)
                 broker_restarts += 1
-                append_event(events, {"ts": now, "event": "broker_restart", "pid": proc.pid, "attempt": broker_restarts})
+                emit({"ts": now, "event": "broker_restart", "pid": proc.pid, "attempt": broker_restarts})
                 time.sleep(min(1.5, ns.interval))
                 broker = asyncio.run(probe(ns.control_uri, secret))
                 broker_ok = bool(broker.get("ok"))
             else:
-                append_event(events, {"ts": now, "event": "broker_restart_limit", "error": broker.get("error")})
+                emit({"ts": now, "event": "broker_restart_limit", "error": broker.get("error")})
 
         ping = asyncio.run(premiere_ping(ns.control_uri, secret)) if broker_ok else {"ok": False, "error": "broker unavailable"}
         premiere_ok = bool(ping.get("ok"))
         # Bound app launches and avoid relaunch storms while Premiere is starting.
         if broker_ok and not premiere_ok and premiere_launches < ns.max_premiere_launches and now - last_launch >= 30:
             ok, err = launch_premiere(premiere)
+            premiere_launches += 1
+            last_launch = now
             if ok:
-                premiere_launches += 1
-                last_launch = now
-                append_event(events, {"ts": now, "event": "premiere_launch", "attempt": premiere_launches})
+                emit({"ts": now, "event": "premiere_launch", "attempt": premiere_launches})
             else:
-                append_event(events, {"ts": now, "event": "premiere_launch_failed", "error": err})
+                emit({"ts": now, "event": "premiere_launch_failed", "attempt": premiere_launches, "error": err})
+        elif broker_ok and not premiere_ok and premiere_launches >= ns.max_premiere_launches:
+            emit({"ts": now, "event": "premiere_launch_limit", "error": ping.get("error")})
 
         state = {
             "timestamp": now,
@@ -139,7 +130,9 @@ def main():
             "last_broker": broker,
             "last_premiere_ping": ping,
         }
-        state_path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp = state_path.with_name(state_path.name + ".tmp")
+        tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, state_path)
         time.sleep(max(1.0, ns.interval))
 
     return 0

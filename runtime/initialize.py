@@ -21,7 +21,9 @@ import time
 import uuid
 from pathlib import Path
 
+from broker_util import read_json, start_broker
 from package_bridge import package as package_bridge
+from rpc_client import call as ws_call
 
 
 def find_adobe_exe(names):
@@ -49,7 +51,7 @@ def version_of(path):
     if platform.system() == "Windows" and ps:
         escaped = path.replace("'", "''")
         cmd = f"(Get-Item -LiteralPath '{escaped}').VersionInfo.ProductVersion"
-        r = subprocess.run([ps, "-NoProfile", "-Command", cmd], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        r = subprocess.run([ps, "-NoProfile", "-Command", cmd], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
         if r.returncode == 0 and r.stdout.strip():
             return r.stdout.strip()
     return None
@@ -81,31 +83,11 @@ def sha256(path: Path):
     return h.hexdigest()
 
 
-async def controller_call(secret, op, timeout=4):
+async def controller_call(secret, op, timeout=4, uri="ws://127.0.0.1:8766"):
     try:
-        from websockets.asyncio.client import connect
-        async with connect("ws://127.0.0.1:8766", open_timeout=2, close_timeout=1) as ws:
-            rid = str(uuid.uuid4())
-            await ws.send(json.dumps({"id": rid, "secret": secret, "op": op, "args": {}, "timeout": timeout}))
-            raw = await asyncio.wait_for(ws.recv(), timeout=timeout + 2)
-            return json.loads(raw)
+        return await ws_call(uri, secret, op, {}, timeout, open_timeout=2, close_timeout=1)
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
-
-
-def start_broker(skill: Path, job: Path, secret_file: Path):
-    state = job / "runtime/broker-state.json"
-    log_path = job / "logs/broker.log"
-    log = log_path.open("a", encoding="utf-8")
-    kwargs = {}
-    if platform.system() == "Windows":
-        kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    proc = subprocess.Popen(
-        [sys.executable, str(skill / "runtime/orchestrator.py"), "--secret-file", str(secret_file), "--state", str(state)],
-        stdout=log, stderr=log, **kwargs,
-    )
-    (job / "runtime/broker.pid").write_text(str(proc.pid), encoding="utf-8")
-    return proc
 
 
 def read_source_inventory(path: Path):
@@ -127,6 +109,7 @@ def main():
     ap.add_argument("--start-broker", action="store_true")
     ap.add_argument("--launch-premiere", action="store_true")
     ap.add_argument("--premiere-wait", type=float, default=45.0)
+    ap.add_argument("--control-uri", default="ws://127.0.0.1:8766", help="controller WebSocket URI of the local broker")
     ns = ap.parse_args()
 
     if ns.auto:
@@ -143,11 +126,20 @@ def main():
     global_dir = Path.home() / ".adobe-autonomous-editor"
     global_dir.mkdir(parents=True, exist_ok=True)
     global_secret = global_dir / "bridge-secret.txt"
-    if not global_secret.exists():
+    if not global_secret.exists() or not global_secret.read_text(encoding="utf-8", errors="replace").strip():
         global_secret.write_text(secrets.token_urlsafe(32), encoding="utf-8")
+    for p in (global_dir, global_secret):
+        try:
+            os.chmod(p, 0o700 if p.is_dir() else 0o600)
+        except OSError:
+            pass
     secret = global_secret.read_text(encoding="utf-8").strip()
     secret_file = job / "runtime/bridge-secret.txt"
     secret_file.write_text(secret, encoding="utf-8")
+    try:
+        os.chmod(secret_file, 0o600)
+    except OSError:
+        pass
 
     inventory_path = job / "analysis/source_inventory.json"
     inventory_run = {"returncode": 2, "stderr": "no sources supplied"}
@@ -208,8 +200,8 @@ def main():
     elif ns.install_bridge:
         install["error"] = "UPIA not found; bridge remains packaged for GUI/enterprise installation"
 
-    broker = {"requested": bool(ns.start_broker), "started": False, "broker_reachable": False, "premiere_connected": False}
-    existing = asyncio.run(controller_call(secret, "broker.status", 3))
+    broker = {"requested": bool(ns.start_broker), "started": False, "broker_reachable": False, "premiere_connected": False, "control_uri": ns.control_uri}
+    existing = asyncio.run(controller_call(secret, "broker.status", 3, ns.control_uri))
     if existing.get("ok"):
         broker.update({"broker_reachable": True, "reused": True, "status": existing.get("result")})
     elif ns.start_broker:
@@ -217,12 +209,12 @@ def main():
             proc = start_broker(skill, job, secret_file)
             broker.update({"started": True, "pid": proc.pid, "state": str(job / "runtime/broker-state.json")})
             time.sleep(0.8)
-            status = asyncio.run(controller_call(secret, "broker.status", 3))
+            status = asyncio.run(controller_call(secret, "broker.status", 3, ns.control_uri))
             broker.update({"broker_reachable": bool(status.get("ok")), "status": status.get("result"), "broker_probe": status})
         except Exception as exc:
             broker["start_error"] = str(exc)
 
-    ping = asyncio.run(controller_call(secret, "ping", 4)) if broker.get("broker_reachable") else {"ok": False, "error": "broker unavailable"}
+    ping = asyncio.run(controller_call(secret, "ping", 4, ns.control_uri)) if broker.get("broker_reachable") else {"ok": False, "error": "broker unavailable"}
     broker["premiere_connected"] = bool(ping.get("ok"))
     broker["rpc_probe"] = ping
 
@@ -232,7 +224,7 @@ def main():
             broker["premiere_launch_attempted"] = True
             deadline = time.time() + max(1, ns.premiere_wait)
             while time.time() < deadline:
-                ping = asyncio.run(controller_call(secret, "ping", 4))
+                ping = asyncio.run(controller_call(secret, "ping", 4, ns.control_uri))
                 if ping.get("ok"):
                     broker["premiere_connected"] = True
                     broker["rpc_probe"] = ping
@@ -242,8 +234,8 @@ def main():
             broker["premiere_launch_error"] = str(exc)
 
     if broker.get("premiere_connected"):
-        broker["host_info"] = asyncio.run(controller_call(secret, "hostInfo", 5))
-        broker["api_capabilities"] = asyncio.run(controller_call(secret, "capabilities", 5))
+        broker["host_info"] = asyncio.run(controller_call(secret, "hostInfo", 5, ns.control_uri))
+        broker["api_capabilities"] = asyncio.run(controller_call(secret, "capabilities", 5, ns.control_uri))
 
     uia = {"available": False}
     if platform.system() == "Windows":
@@ -307,13 +299,49 @@ def main():
     if install.get("reused_marker") and not broker.get("premiere_connected"):
         notes.append("A prior bridge-install marker exists but the current host did not connect; do not trust the marker alone—perform targeted bridge recovery.")
 
+    degraded_capabilities = []
+    if tools["premiere"] and not broker.get("premiere_connected"):
+        degraded_capabilities.append("premiere.uxp_rpc")
+    if tools["afterfx"] and not ae_probe.get("script_rpc"):
+        degraded_capabilities.append("after_effects.jsx_rpc")
+    if not media_qc:
+        degraded_capabilities.append("media.ffmpeg")
+    if tools["premiere"] and not uia["available"]:
+        degraded_capabilities.append("premiere.uia_fallback")
+    blockers = []
+    if not sources_ok:
+        blockers.append("no readable source media in inventory")
+    if not adobe_any:
+        blockers.append("no Adobe host found (Premiere Pro / After Effects)")
+
+    # A stable job id survives re-runs so init history stays attributable to one job.
+    prior = read_json(job / "plans/init_state.json")
+    job_id = prior.get("job_id") or f"job-{hashlib.sha256(str(job).encode()).hexdigest()[:10]}"
+
     init = {
-        "status": status, "timestamp": time.time(), "job_root": str(job), "source_inventory_ok": sources_ok,
-        "source_files_found": len(existing_sources), "capability_matrix": str(job / "plans/capability_matrix.json"),
-        "bridge_secret_file": str(secret_file), "notes": notes,
+        "schema_version": 1,
+        "job_id": job_id,
+        "status": status,
+        "timestamp": time.time(),
+        "initialized_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "job_root": str(job),
+        "source_inventory": "analysis/source_inventory.json",
+        "environment": "analysis/environment.json",
+        "capability_matrix": "plans/capability_matrix.json",
+        "preferred_premiere_surface": "uxp" if broker.get("premiere_connected") else ("uia" if uia["available"] else None),
+        "preferred_ae_surface": "jsx" if ae_probe.get("script_rpc") else ("uia" if uia["available"] else None),
+        "degraded_capabilities": degraded_capabilities,
+        "blockers": blockers,
+        "next": "workflow-routing" if status != "BLOCKED" else "resolve-blockers",
+        "source_inventory_ok": sources_ok,
+        "source_files_found": len(existing_sources),
+        "bridge_secret_file": str(secret_file),
+        "notes": notes,
     }
     (job / "plans/init_state.json").write_text(json.dumps(init, indent=2, ensure_ascii=False), encoding="utf-8")
-    history = job / "recovery/init-history" / f"init-{int(time.time())}.json"
+    with (job / "logs/initialize.log").open("a", encoding="utf-8") as logf:
+        logf.write(json.dumps(init, ensure_ascii=False) + "\n")
+    history = job / "recovery/init-history" / f"init-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}.json"
     history.write_text(json.dumps({"init": init, "capabilities": capabilities}, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps(init, indent=2, ensure_ascii=False))
     raise SystemExit(0 if status != "BLOCKED" else 2)

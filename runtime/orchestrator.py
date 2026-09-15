@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hmac
 import json
 import os
 import signal
@@ -46,22 +47,33 @@ class Broker:
         self.premiere_lock = asyncio.Lock()
         self._write_state()
 
-    def _write_state(self):
-        if not self.state_path:
-            return
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = asdict(self.state) | {
+    def _status_payload(self):
+        return asdict(self.state) | {
             "premiere_port": self.premiere_port,
             "control_port": self.control_port,
             "pid": os.getpid(),
         }
-        self.state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def _write_state(self):
+        if not self.state_path:
+            return
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.state_path.with_name(self.state_path.name + ".tmp")
+        tmp.write_text(json.dumps(self._status_payload(), indent=2), encoding="utf-8")
+        os.replace(tmp, self.state_path)
+
+    def _authorized(self, provided) -> bool:
+        try:
+            return hmac.compare_digest(str(provided or ""), self.secret)
+        except TypeError:
+            # compare_digest rejects non-ASCII str; an exotic secret is simply wrong.
+            return False
 
     async def premiere_handler(self, ws):
         try:
             raw = await asyncio.wait_for(ws.recv(), timeout=10)
             hello = json.loads(raw)
-            if hello.get("type") != "hello" or hello.get("secret") != self.secret:
+            if hello.get("type") != "hello" or not self._authorized(hello.get("secret")):
                 await ws.close(code=4001, reason="authentication failed")
                 return
             if self.premiere_ws is not None:
@@ -91,7 +103,10 @@ class Broker:
     async def _forward_to_premiere(self, request: dict[str, Any]) -> dict[str, Any]:
         if self.premiere_ws is None:
             return {"id": request.get("id"), "ok": False, "error": "Premiere bridge is not connected"}
-        timeout = float(request.get("timeout", 60))
+        try:
+            timeout = max(1.0, float(request.get("timeout", 60)))
+        except (TypeError, ValueError):
+            timeout = 60.0
         payload = {"id": request.get("id") or str(uuid.uuid4()), "op": request.get("op"), "args": request.get("args") or {}}
         async with self.premiere_lock:
             try:
@@ -114,12 +129,15 @@ class Broker:
                 except Exception:
                     await ws.send(json.dumps({"ok": False, "error": "invalid JSON"}))
                     continue
-                if req.get("secret") != self.secret:
+                if not isinstance(req, dict):
+                    await ws.send(json.dumps({"ok": False, "error": "request must be a JSON object"}))
+                    continue
+                if not self._authorized(req.get("secret")):
                     await ws.send(json.dumps({"id": req.get("id"), "ok": False, "error": "authentication failed"}))
                     continue
                 op = req.get("op")
                 if op == "broker.status":
-                    await ws.send(json.dumps({"id": req.get("id"), "ok": True, "result": asdict(self.state)}))
+                    await ws.send(json.dumps({"id": req.get("id"), "ok": True, "result": self._status_payload()}))
                     continue
                 result = await self._forward_to_premiere(req)
                 await ws.send(json.dumps(result))

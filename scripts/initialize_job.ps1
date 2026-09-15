@@ -14,13 +14,13 @@ $ErrorActionPreference="Stop"
 New-Item -ItemType Directory -Force -Path (Join-Path $JobRoot "runtime") | Out-Null
 if($SkipRuntimeSetup){$py=(Get-Command python -ErrorAction Stop).Source}
 else{$py=& (Join-Path $SkillRoot "scripts\setup_runtime.ps1") -JobRoot $JobRoot -SkillRoot $SkillRoot | Select-Object -Last 1}
-$args=@((Join-Path $SkillRoot "runtime\initialize.py"),"--job-root",$JobRoot,"--skill-root",$SkillRoot,"--brief",$Brief)
-foreach($s in $Source){$args += @("--source",$s)}
+$initArgs=@((Join-Path $SkillRoot "runtime\initialize.py"),"--job-root",$JobRoot,"--skill-root",$SkillRoot,"--brief",$Brief)
+foreach($s in $Source){$initArgs += @("--source",$s)}
 $explicit = $InstallBridge -or $StartBroker -or $LaunchPremiere -or $ForceInstallBridge
-if((-not $NoAuto) -and (-not $explicit)){$args += "--auto"}
-if($InstallBridge){$args += "--install-bridge"}
-if($ForceInstallBridge){$args += @("--install-bridge","--force-install-bridge")}
-if($StartBroker){$args += "--start-broker"}
-if($LaunchPremiere){$args += "--launch-premiere"}
-& $py @args
+if((-not $NoAuto) -and (-not $explicit)){$initArgs += "--auto"}
+if($InstallBridge -or $ForceInstallBridge){$initArgs += "--install-bridge"}
+if($ForceInstallBridge){$initArgs += "--force-install-bridge"}
+if($StartBroker){$initArgs += "--start-broker"}
+if($LaunchPremiere){$initArgs += "--launch-premiere"}
+& $py @initArgs
 exit $LASTEXITCODE

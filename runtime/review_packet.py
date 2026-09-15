@@ -9,7 +9,10 @@ def run(cmd):
 
 def duration(ffprobe,media):
     c,o,e=run([ffprobe,"-v","error","-show_entries","format=duration","-of","default=nw=1:nk=1",str(media)])
-    return float(o.strip()) if c==0 and o.strip() else 0.0
+    try:
+        return float(o.strip()) if c==0 and o.strip() else 0.0
+    except ValueError:
+        return 0.0
 
 def main():
     ap=argparse.ArgumentParser();ap.add_argument("media");ap.add_argument("--out-dir",required=True);ap.add_argument("--frames",type=int,default=12);ns=ap.parse_args()
