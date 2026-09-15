@@ -5,8 +5,13 @@ import argparse, asyncio, json, uuid
 from pathlib import Path
 from websockets.asyncio.client import connect
 
-async def call(uri: str, secret: str, op: str, args: dict, timeout: float):
-    async with connect(uri, max_size=8 * 1024 * 1024) as ws:
+async def call(uri: str, secret: str, op: str, args: dict, timeout: float, open_timeout=None, close_timeout=None):
+    kwargs = {"max_size": 8 * 1024 * 1024}
+    if open_timeout is not None:
+        kwargs["open_timeout"] = open_timeout
+    if close_timeout is not None:
+        kwargs["close_timeout"] = close_timeout
+    async with connect(uri, **kwargs) as ws:
         req = {"id": str(uuid.uuid4()), "secret": secret, "op": op, "args": args, "timeout": timeout}
         await ws.send(json.dumps(req))
         return json.loads(await asyncio.wait_for(ws.recv(), timeout=timeout + 5))

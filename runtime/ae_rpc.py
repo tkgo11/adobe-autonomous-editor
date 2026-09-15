@@ -15,7 +15,7 @@ JS_RUNTIME = r'''
   var RESULT_FILE = __RESULT_FILE__;
   var result = {ok:true, actions:[], error:null};
 
-  function esc(s){return String(s).replace(/\\/g,"\\\\").replace(/\"/g,'\\"').replace(/\r/g,"\\r").replace(/\n/g,"\\n");}
+  function esc(s){return String(s).replace(/\\/g,"\\\\").replace(/\"/g,'\\"').replace(/[\x00-\x1f]/g,function(c){var n=c.charCodeAt(0);return n===10?"\\n":n===13?"\\r":n===9?"\\t":"\\u"+("0000"+n.toString(16)).slice(-4);}).replace(/\u2028/g,"\\u2028").replace(/\u2029/g,"\\u2029");}
   function stringify(x){
     if(x===null) return "null";
     var t=typeof x;
@@ -156,14 +156,25 @@ JS_RUNTIME = r'''
 })();
 '''
 
+def _js_safe(s: str) -> str:
+    # U+2028/U+2029 are line terminators in ExtendScript (ES3): a raw occurrence inside a
+    # string literal is a syntax error. Escape them so generated JSX always parses.
+    return s.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+
 def js_string(s: str) -> str:
-    return json.dumps(str(s).replace("\\", "/"), ensure_ascii=False)
+    return _js_safe(json.dumps(str(s).replace("\\", "/"), ensure_ascii=False))
 
 def compile_jsx(plan: dict, result_file: Path) -> str:
-    payload = json.dumps(plan, ensure_ascii=False, separators=(",", ":"))
-    return JS_RUNTIME.replace("__PAYLOAD__", payload).replace("__RESULT_FILE__", js_string(str(result_file)))
+    payload = _js_safe(json.dumps(plan, ensure_ascii=False, separators=(",", ":")))
+    # Replace __RESULT_FILE__ first: payload text is inserted verbatim afterwards, so
+    # plan content can never be rewritten by a later placeholder substitution.
+    return JS_RUNTIME.replace("__RESULT_FILE__", js_string(str(result_file))).replace("__PAYLOAD__", payload)
 
 def dispatch(afterfx: str, jsx_path: Path, result_path: Path, timeout: float) -> dict:
+    try:
+        result_path.unlink(missing_ok=True)
+    except Exception:
+        pass
     subprocess.Popen([afterfx, "-r", str(jsx_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     deadline = time.time() + timeout
     while time.time() < deadline:

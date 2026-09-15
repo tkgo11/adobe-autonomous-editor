@@ -16,16 +16,46 @@ import time
 import uuid
 from pathlib import Path
 
-from websockets.asyncio.client import connect
 from ae_rpc import compile_jsx, dispatch as ae_dispatch
 from desktop_driver import run_steps
+from rpc_client import call as ws_call
 
 
-async def premiere_call(uri, secret, op, args, timeout=90):
-    async with connect(uri, max_size=8 * 1024 * 1024) as ws:
-        rid = str(uuid.uuid4())
-        await ws.send(json.dumps({"id": rid, "secret": secret, "op": op, "args": args, "timeout": timeout}))
-        return json.loads(await asyncio.wait_for(ws.recv(), timeout=timeout + 5))
+def minimal_plan_check(plan):
+    """Structural fallback when the jsonschema package/schema is unavailable."""
+    if not isinstance(plan, dict) or not isinstance(plan.get("actions"), list):
+        raise SystemExit("Invalid plan: expected a JSON object with an 'actions' array")
+    for i, action in enumerate(plan["actions"]):
+        if not isinstance(action, dict) or "engine" not in action:
+            raise SystemExit(f"Invalid plan: action[{i}] must be an object with an 'engine' field")
+
+
+def load_plan(plan_path: Path, skill: Path):
+    try:
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise SystemExit(f"Could not read plan {plan_path}: {exc}")
+    schema_path = skill / "schemas/execution_plan.schema.json"
+    if not schema_path.exists():
+        minimal_plan_check(plan)
+        return plan
+    try:
+        import jsonschema
+    except ImportError:
+        minimal_plan_check(plan)
+        return plan
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    errors = sorted(
+        jsonschema.Draft202012Validator(schema).iter_errors(plan),
+        key=lambda e: list(e.absolute_path),
+    )
+    if errors:
+        detail = "\n".join(
+            f"  - {'/'.join(map(str, e.absolute_path)) or '<root>'}: {e.message}"
+            for e in errors[:25]
+        )
+        raise SystemExit(f"Plan failed schema validation ({schema_path.name}):\n{detail}")
+    return plan
 
 
 class Executor:
@@ -37,9 +67,9 @@ class Executor:
         self.env = json.loads((job / "analysis/environment.json").read_text(encoding="utf-8"))
 
     def primitive(self, a):
-        engine = a["engine"]
+        engine = a.get("engine")
         if engine == "premiere":
-            return asyncio.run(premiere_call(self.control_uri, self.secret, a["op"], a.get("args", {}), float(a.get("timeout", 90))))
+            return asyncio.run(ws_call(self.control_uri, self.secret, a.get("op"), a.get("args", {}), float(a.get("timeout", 90))))
 
         if engine == "after_effects":
             payload = {"undoGroup": a.get("undoGroup", "Autonomous Editor"), "actions": a.get("actions", [a.get("action")])}
@@ -111,6 +141,8 @@ class Executor:
             started = time.time()
             try:
                 result = self.primitive(a)
+                if not isinstance(result, dict):
+                    result = {"ok": False, "error": f"unexpected result type: {type(result).__name__}", "raw": result}
             except Exception as exc:
                 result = {"ok": False, "error": str(exc)}
             attempts.append({"kind": "primary", "attempt": attempt + 1, "elapsed": time.time() - started, "result": result})
@@ -154,9 +186,12 @@ def main():
     ap.add_argument("--control-uri", default="ws://127.0.0.1:8766")
     ns = ap.parse_args()
 
-    plan = json.loads(Path(ns.plan).read_text(encoding="utf-8"))
     job = Path(ns.job_root).resolve(); skill = Path(ns.skill_root).resolve()
-    ex = Executor(job, skill, ns.control_uri)
+    plan = load_plan(Path(ns.plan), skill)
+    try:
+        ex = Executor(job, skill, ns.control_uri)
+    except Exception as exc:
+        raise SystemExit(f"Executor init failed for job {job}: {exc}")
     results = []
 
     for i, action in enumerate(plan["actions"]):

@@ -20,3 +20,6 @@ runtime/bridge-secret.txt
 Thumbs.db
 .vscode/
 .idea/
+
+# Local maintenance tooling state
+.omx/
