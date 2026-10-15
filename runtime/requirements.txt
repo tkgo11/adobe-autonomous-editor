@@ -1,6 +1,5 @@
 websockets>=13,<16
 jsonschema>=4.21
 psutil>=5.9
-static-ffmpeg==3.0; platform_system == "Darwin"
 pywinauto>=0.6.8; platform_system == "Windows"
 pyautogui>=0.9.54; platform_system == "Windows"

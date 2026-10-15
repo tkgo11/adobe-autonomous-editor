@@ -80,8 +80,8 @@ def _btbn_asset() -> str | None:
     return None
 
 
-def _release_digest(asset: str) -> str:
-    url = "https://github.com/BtbN/FFmpeg-Builds/releases/expanded_assets/latest"
+def _release_digest(asset: str, repo: str = "BtbN/FFmpeg-Builds", tag: str = "latest") -> str:
+    url = f"https://github.com/{repo}/releases/expanded_assets/{tag}"
     with urllib.request.urlopen(_request(url), timeout=60) as response:
         page = response.read().decode("utf-8", "replace")
     pattern = rf'aria-label="Copy to clipboard digest for {re.escape(html.escape(asset))}"[^>]*value="sha256:([0-9a-fA-F]{{64}})"'
@@ -89,6 +89,15 @@ def _release_digest(asset: str) -> str:
     if not match:
         raise RuntimeError(f"GitHub release metadata did not publish a SHA-256 digest for {asset}")
     return match.group(1).lower()
+
+
+def _latest_release_tag(repo: str) -> str:
+    with urllib.request.urlopen(_request(f"https://github.com/{repo}/releases/latest"), timeout=60) as response:
+        final = response.geturl()
+    match = re.search(r"/releases/tag/([^/?#]+)$", final)
+    if not match or not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._-]*", match.group(1)):
+        raise RuntimeError(f"could not resolve a safe release tag for {repo}: {final}")
+    return match.group(1)
 
 
 def _safe_target(root: Path, name: str) -> Path:
@@ -161,19 +170,44 @@ def _install_btbn(root: Path, asset: str) -> tuple[str, str, dict]:
     return str(ffmpeg), str(ffprobe), {"asset": asset, "archive_sha256": actual, "expected_sha256": expected}
 
 
-def _install_macos(root: Path) -> tuple[str, str, dict]:
-    from static_ffmpeg.run import get_or_fetch_platform_executables_else_raise, get_platform_key
+def _mac_asset_names(machine: str | None = None) -> tuple[str, str]:
+    machine = (machine or platform.machine()).lower()
+    arch = "arm64" if machine in {"arm64", "aarch64"} else "x64" if machine in {"x86_64", "amd64", "x64"} else None
+    if not arch:
+        raise RuntimeError(f"no managed macOS ffmpeg distribution for {machine}")
+    return f"ffmpeg-darwin-{arch}", f"ffprobe-darwin-{arch}"
 
-    target = root / get_platform_key()
-    ffmpeg, ffprobe = get_or_fetch_platform_executables_else_raise(download_dir=str(target))
-    return ffmpeg, ffprobe, {"provider": "static-ffmpeg==3.0"}
+
+def _install_macos(root: Path) -> tuple[str, str, dict]:
+    repo = "eugeneware/ffmpeg-static"
+    tag = _latest_release_tag(repo)
+    assets = _mac_asset_names()
+    target = root / "releases" / tag
+    downloads = root / "downloads" / tag
+    paths = []
+    digests = {}
+    for asset in assets:
+        expected = _release_digest(asset, repo, tag)
+        downloaded = downloads / asset
+        if not downloaded.exists() or _sha256(downloaded) != expected:
+            _download(f"https://github.com/{repo}/releases/download/{tag}/{asset}", downloaded)
+        actual = _sha256(downloaded)
+        if actual != expected:
+            raise RuntimeError(f"checksum mismatch for {asset}: expected {expected}, got {actual}")
+        target.mkdir(parents=True, exist_ok=True)
+        installed = target / asset.split("-", 1)[0]
+        shutil.copyfile(downloaded, installed)
+        installed.chmod(0o755)
+        paths.append(str(installed.resolve()))
+        digests[asset] = actual
+    return paths[0], paths[1], {"provider": repo, "tag": tag, "sha256": digests}
 
 
 def ensure_media_tools(state_dir: Path) -> dict:
     """Return verified ffmpeg/ffprobe paths, installing a local copy if needed.
 
     Windows/Linux use the SHA-256 published in BtbN's GitHub release metadata.
-    macOS uses the platform bundle provider installed in the isolated job venv.
+    macOS uses eugeneware/ffmpeg-static assets and GitHub-published SHA-256 digests.
     Every bundle lives under machine state, never a system directory, and both
     executables must pass a real version probe before use.
     """
@@ -221,7 +255,7 @@ def ensure_media_tools(state_dir: Path) -> dict:
         _prepend(Path(paths["ffmpeg"]).parent)
         manifest = {
             "schema_version": 1,
-            "source": "BtbN/FFmpeg-Builds" if asset else "static-ffmpeg PyPI package / zackees/ffmpeg_bins",
+            "source": "BtbN/FFmpeg-Builds" if asset else "eugeneware/ffmpeg-static",
             "provenance": provenance,
             "installed_at": time.time(),
             "paths": paths,

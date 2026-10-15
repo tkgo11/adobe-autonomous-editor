@@ -7,6 +7,7 @@ import platform
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 def read_json(path: Path, default=None):
@@ -16,7 +17,22 @@ def read_json(path: Path, default=None):
         return {} if default is None else default
 
 
-def start_broker(skill: Path, job: Path, secret_file: Path | None = None) -> subprocess.Popen:
+def broker_command(skill: Path, secret_file: Path, state: Path, control_uri: str | None = None) -> list[str]:
+    command = [sys.executable, str(skill / "runtime/orchestrator.py"), "--secret-file", str(secret_file), "--state", str(state)]
+    if control_uri:
+        parsed = urlparse(control_uri)
+        if parsed.scheme != "ws" or parsed.hostname not in {"127.0.0.1", "localhost"} or not parsed.port:
+            raise ValueError(f"control URI must be a loopback ws:// URI with an explicit port: {control_uri}")
+        command.extend(["--host", "127.0.0.1", "--control-port", str(parsed.port)])
+    return command
+
+
+def start_broker(
+    skill: Path,
+    job: Path,
+    secret_file: Path | None = None,
+    control_uri: str | None = None,
+) -> subprocess.Popen:
     secret_file = secret_file or (job / "runtime/bridge-secret.txt")
     state = job / "runtime/broker-state.json"
     log_path = job / "logs/broker.log"
@@ -26,7 +42,7 @@ def start_broker(skill: Path, job: Path, secret_file: Path | None = None) -> sub
     if platform.system() == "Windows":
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     proc = subprocess.Popen(
-        [sys.executable, str(skill / "runtime/orchestrator.py"), "--secret-file", str(secret_file), "--state", str(state)],
+        broker_command(skill, secret_file, state, control_uri),
         stdout=log,
         stderr=log,
         **kwargs,

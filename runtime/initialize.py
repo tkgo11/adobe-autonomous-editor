@@ -62,6 +62,56 @@ def read_source_inventory(path: Path):
         return {"sources": []}
 
 
+def should_prepare_adobe(editor_priority: str, auto: bool) -> bool:
+    return bool(auto and editor_priority == "adobe-only")
+
+
+def safe_ae_probe_plan() -> dict:
+    return {"actions": []}
+
+
+def preferred_editors(editor_priority: str, crafting: dict, tools: dict) -> list[str]:
+    editors = []
+    if editor_priority == "crafting-first":
+        editors.extend(app for app in ("filmcraft", "effectcraft") if crafting[app].get("available"))
+    if tools.get("premiere"):
+        editors.append("premiere")
+    if tools.get("afterfx"):
+        editors.append("after_effects")
+    return editors
+
+
+def initialization_status(
+    editor_priority: str,
+    sources_ok: bool,
+    crafting_any: bool,
+    crafting_ready: bool,
+    adobe_any: bool,
+    premiere_control: bool,
+    ae_control: bool,
+    media_qc: bool,
+    premiere_installed: bool,
+    premiere_rpc: bool,
+    afterfx_installed: bool,
+    afterfx_rpc: bool,
+) -> str:
+    if not sources_ok:
+        return "BLOCKED"
+    if editor_priority == "adobe-only" and not adobe_any:
+        return "BLOCKED"
+    if editor_priority == "crafting-first" and not (crafting_any or adobe_any):
+        return "BLOCKED"
+    if editor_priority == "crafting-first" and crafting_ready and media_qc:
+        return "READY"
+    if (
+        editor_priority == "adobe-only" and adobe_any and premiere_control and ae_control and media_qc
+        and (not premiere_installed or premiere_rpc)
+        and (not afterfx_installed or afterfx_rpc)
+    ):
+        return "READY"
+    return "DEGRADED"
+
+
 def machine_state_dir(explicit_dir, job: Path):
     """Return a writable directory for state shared by jobs on this machine.
 
@@ -165,10 +215,11 @@ def main():
         crafting[app] = probe_crafting_app(app, path)
     crafting_ready = all(crafting[app].get("available") for app in CRAFTING_APPS)
     crafting_any = any(crafting[app].get("available") for app in CRAFTING_APPS)
-    adobe_required = ns.editor_priority == "adobe-only" or not crafting_ready
-    # If either specialized CLI is unavailable, prepare the Adobe fallback for
-    # that missing role.  Healthy Crafting Apps still avoid Adobe startup.
-    auto_needs_adobe = ns.auto and (ns.editor_priority == "adobe-only" or not crafting_ready)
+    # Crafting-first initialization records missing roles but does not start an
+    # Adobe application preemptively. The selected operation activates its own
+    # Adobe fallback only after the matching Crafting capability is required.
+    adobe_required = ns.editor_priority == "adobe-only"
+    auto_needs_adobe = should_prepare_adobe(ns.editor_priority, ns.auto)
     if auto_needs_adobe:
         ns.install_bridge = True
         ns.start_broker = True
@@ -231,7 +282,7 @@ def main():
         broker.update({"broker_reachable": True, "reused": True, "status": existing.get("result")})
     elif ns.start_broker:
         try:
-            proc = start_broker(skill, job, secret_file)
+            proc = start_broker(skill, job, secret_file, ns.control_uri)
             broker.update({"started": True, "pid": proc.pid, "state": str(job / "runtime/broker-state.json")})
             time.sleep(0.8)
             status = asyncio.run(controller_call(secret, "broker.status", 3, ns.control_uri))
@@ -272,7 +323,9 @@ def main():
     if tools["afterfx"] and adobe_required:
         plan = job / "temp/ae-selftest.json"
         res = job / "temp/ae-selftest-result.json"
-        plan.write_text(json.dumps({"actions": [{"op": "newProject"}, {"op": "createComp", "name": "__AutonomousEditorSelfTest__", "width": 64, "height": 64, "duration": 1, "fps": 24}]}), encoding="utf-8")
+        # An empty action list still exercises AfterFX -r and the result-file
+        # round trip without opening, closing, saving, or mutating a project.
+        plan.write_text(json.dumps(safe_ae_probe_plan()), encoding="utf-8")
         try:
             r = subprocess.run(
                 [sys.executable, str(skill / "runtime/ae_rpc.py"), str(plan), "--afterfx", tools["afterfx"], "--result", str(res), "--timeout", "30"],
@@ -319,20 +372,18 @@ def main():
     ae_control = not tools["afterfx"] or bool(ae_probe.get("script_rpc")) or desktop_available
     media_qc = bool(tools["ffmpeg"] and tools["ffprobe"])
 
-    if not sources_ok or not (crafting_any or adobe_any):
-        status = "BLOCKED"
-    elif ns.editor_priority == "crafting-first" and crafting_ready and media_qc:
-        status = "READY"
-    elif ns.editor_priority == "adobe-only" and adobe_any and premiere_control and ae_control and media_qc and (not tools["premiere"] or broker.get("premiere_connected")) and (not tools["afterfx"] or ae_probe.get("script_rpc")):
-        status = "READY"
-    else:
-        status = "DEGRADED"
+    status = initialization_status(
+        ns.editor_priority, sources_ok, crafting_any, crafting_ready, adobe_any,
+        premiere_control, ae_control, media_qc, bool(tools["premiere"]),
+        bool(broker.get("premiere_connected")), bool(tools["afterfx"]),
+        bool(ae_probe.get("script_rpc")),
+    )
 
     notes = []
     if ns.editor_priority == "crafting-first":
         for app in CRAFTING_APPS:
             if not crafting[app].get("available"):
-                notes.append(f"{CRAFTING_APPS[app]['cli']} is unavailable; route matching operations to the tested Adobe fallback after the install/probe failure is recorded.")
+                notes.append(f"{CRAFTING_APPS[app]['cli']} is unavailable; activate and test the matching Adobe fallback only if the job requires that capability.")
     if adobe_required and tools["premiere"] and not broker.get("premiere_connected"):
         notes.append("Premiere explicit UXP RPC is not yet confirmed. Use bridge install/reload/restart recovery, then the platform desktop-accessibility/vision fallback if necessary.")
     if adobe_required and tools["afterfx"] and not ae_probe.get("script_rpc"):
@@ -363,7 +414,9 @@ def main():
     blockers = []
     if not sources_ok:
         blockers.append("no readable source media in inventory")
-    if not (crafting_any or adobe_any):
+    if ns.editor_priority == "adobe-only" and not adobe_any:
+        blockers.append("Adobe-only policy requested but neither Premiere Pro nor After Effects is installed")
+    elif ns.editor_priority == "crafting-first" and not (crafting_any or adobe_any):
         blockers.append("no usable video editor found (FilmCraft/EffectCraft CLI or Adobe Premiere Pro/After Effects)")
 
     # A stable job id survives re-runs so init history stays attributable to one job.
@@ -382,11 +435,7 @@ def main():
         "environment": "analysis/environment.json",
         "capability_matrix": "plans/capability_matrix.json",
         "editor_priority": ns.editor_priority,
-        "preferred_editors": (
-            [app for app in ("filmcraft", "effectcraft") if crafting[app].get("available")] + (["premiere", "after_effects"] if adobe_any else [])
-            if ns.editor_priority == "crafting-first"
-            else (["premiere", "after_effects"] if adobe_any else [])
-        ),
+        "preferred_editors": preferred_editors(ns.editor_priority, crafting, tools),
         "preferred_premiere_surface": "uxp" if broker.get("premiere_connected") else (desktop_backend if desktop_available else None),
         "preferred_ae_surface": "jsx" if ae_probe.get("script_rpc") else (desktop_backend if desktop_available else None),
         "degraded_capabilities": degraded_capabilities,

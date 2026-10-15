@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import platform
 import re
 import shutil
@@ -182,7 +183,15 @@ def _find_in_tree(root: Path, app: str) -> Path | None:
 def discover(app: str, state_dir: Path | None = None) -> str | None:
     """Find a managed release first, then fall back to a CLI on PATH."""
     if state_dir:
-        hit = _find_in_tree(Path(state_dir) / "crafting-apps" / app, app)
+        root = (Path(state_dir) / "crafting-apps" / app).resolve()
+        try:
+            manifest = json.loads((root / "install.json").read_text(encoding="utf-8"))
+            recorded = Path(manifest["path"]).resolve()
+            if root in recorded.parents and recorded.name == _binary_name(app) and recorded.is_file() and os.access(recorded, os.X_OK):
+                return str(recorded)
+        except Exception:
+            pass
+        hit = _find_in_tree(root, app)
         if hit:
             return str(hit)
     path = shutil.which(APPS[app]["cli"])

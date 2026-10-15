@@ -25,7 +25,7 @@ Given:
 the agent shall autonomously:
 
 1. invoke the mandatory internal initializer at `skills/initialize/SKILL.md`;
-2. inventory/fingerprint sources, install missing FilmCraft/EffectCraft CLIs when permitted, and establish tested Crafting Apps plus Adobe fallback capabilities through that initializer;
+2. inventory/fingerprint sources, install missing FilmCraft/EffectCraft CLIs when permitted, and establish tested Crafting Apps capabilities plus discoverable Adobe fallback surfaces through that initializer;
 3. infer delivery format when not specified;
 4. analyze dialogue, scenes, subjects, motion, shot quality, music, graphics needs, continuity, pacing, and technical defects;
 5. translate the brief into an explicit edit specification;

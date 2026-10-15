@@ -96,7 +96,7 @@ def main():
         broker_ok = bool(broker.get("ok"))
         if not broker_ok:
             if broker_restarts < ns.max_restarts:
-                proc = start_broker(skill, job)
+                proc = start_broker(skill, job, control_uri=ns.control_uri)
                 broker_restarts += 1
                 emit({"ts": now, "event": "broker_restart", "pid": proc.pid, "attempt": broker_restarts})
                 time.sleep(min(1.5, ns.interval))

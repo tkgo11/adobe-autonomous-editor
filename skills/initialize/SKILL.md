@@ -264,7 +264,7 @@ Record the routing policy and this strict priority order:
 3. Premiere Pro / After Effects for features unavailable or failing verification in the matching Crafting App;
 4. Adobe UI automation / Computer Use as the final compatibility layer.
 
-Do not launch Adobe automatically when both Crafting Apps CLIs are healthy. Prepare/probe Adobe as a fallback, and launch it only when a required fallback becomes active.
+Under `crafting-first`, do not launch Adobe during initialization merely because either Crafting Apps CLI is unavailable. Record the missing role and activate/probe the matching Adobe surface only when a required operation selects that fallback. Under `adobe-only`, prepare and probe the installed Adobe hosts during initialization.
 
 ## Stage F — Premiere control-surface probe
 

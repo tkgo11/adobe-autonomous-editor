@@ -55,6 +55,33 @@ archive_install() {
   rm -rf "$temp"
 }
 
+validate_install() {
+  local target="$1"
+  [[ -f "$target/SKILL.md" ]] || { echo "SKILL.md is missing after install." >&2; return 1; }
+  [[ -f "$target/agents/openai.yaml" ]] || { echo "agents/openai.yaml is missing after install." >&2; return 1; }
+  grep -Eq '^name:[[:space:]]*adobe-autonomous-editor[[:space:]]*$' "$target/SKILL.md" || {
+    echo "SKILL.md frontmatter name is invalid." >&2
+    return 1
+  }
+}
+
+validate_runtime() {
+  local target="$1"
+  if [[ "$SKIP_VALIDATION" -eq 0 ]] && command -v python3 >/dev/null 2>&1; then
+    echo "Running package self-test in staged installation..."
+    python3 "$target/tests/selftest.py"
+  fi
+}
+
+install_fresh() {
+  local target="$1"
+  if command -v git >/dev/null 2>&1; then
+    git clone --depth 1 "$REPO" "$target"
+  else
+    archive_install "$target"
+  fi
+}
+
 if [[ "$SCOPE" == "user" ]]; then
   SKILLS_ROOT="${HOME}/.agents/skills"
 else
@@ -65,14 +92,33 @@ fi
 DEST="${SKILLS_ROOT}/${SKILL_NAME}"
 mkdir -p "$SKILLS_ROOT"
 
+replace_transactionally() {
+  local stage backup
+  stage="${SKILLS_ROOT}/.${SKILL_NAME}.stage.$$.${RANDOM}"
+  backup="${SKILLS_ROOT}/.${SKILL_NAME}.backup.$$.${RANDOM}"
+  if ! install_fresh "$stage" || ! validate_install "$stage" || ! validate_runtime "$stage"; then
+    [[ -e "$stage" ]] && rm -rf "$stage"
+    return 1
+  fi
+  if [[ -e "$DEST" ]]; then
+    mv "$DEST" "$backup"
+  fi
+  if mv "$stage" "$DEST"; then
+    [[ -e "$backup" ]] && rm -rf "$backup"
+  else
+    [[ -e "$backup" ]] && mv "$backup" "$DEST"
+    [[ -e "$stage" ]] && rm -rf "$stage"
+    return 1
+  fi
+}
+
 if [[ -e "$DEST" ]]; then
   if [[ -d "$DEST/.git" ]] && command -v git >/dev/null 2>&1; then
     echo "Updating existing skill at $DEST"
     git -C "$DEST" pull --ff-only
   elif [[ "$FORCE" -eq 1 || -f "$DEST/.installed-from-archive" ]]; then
-    echo "Replacing existing non-git directory at $DEST"
-    rm -rf "$DEST"
-    if command -v git >/dev/null 2>&1; then git clone --depth 1 "$REPO" "$DEST"; else archive_install "$DEST"; fi
+    echo "Staging and replacing existing non-git directory at $DEST"
+    replace_transactionally
   else
     echo "Destination exists and is not a git checkout: $DEST" >&2
     echo "Rerun with --force to replace it." >&2
@@ -80,14 +126,10 @@ if [[ -e "$DEST" ]]; then
   fi
 else
   echo "Installing $SKILL_NAME to $DEST"
-  if command -v git >/dev/null 2>&1; then git clone --depth 1 "$REPO" "$DEST"; else archive_install "$DEST"; fi
+  replace_transactionally
 fi
 
-[[ -f "$DEST/SKILL.md" ]] || { echo "SKILL.md is missing after install." >&2; exit 1; }
-[[ -f "$DEST/agents/openai.yaml" ]] || { echo "agents/openai.yaml is missing after install." >&2; exit 1; }
-grep -Eq '^name:[[:space:]]*adobe-autonomous-editor[[:space:]]*$' "$DEST/SKILL.md" || {
-  echo "SKILL.md frontmatter name is invalid." >&2; exit 1;
-}
+validate_install "$DEST"
 
 if [[ "$SKIP_VALIDATION" -eq 0 ]] && command -v python3 >/dev/null 2>&1; then
   echo "Running package self-test..."

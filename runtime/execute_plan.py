@@ -84,6 +84,16 @@ def load_plan(plan_path: Path, skill: Path):
     return plan
 
 
+def premiere_needs_activation(result: dict) -> bool:
+    if result.get("ok"):
+        return False
+    error = str(result.get("error") or "").lower()
+    return any(marker in error for marker in (
+        "premiere bridge is not connected", "broker unavailable",
+        "connection refused", "connect call failed", "timed out",
+    ))
+
+
 class Executor:
     def __init__(self, job: Path, skill: Path, control_uri: str):
         self.job = job
@@ -129,7 +139,7 @@ class Executor:
             recovery["steps"].append({"op": "install_bridge", "ok": False, "error": missing})
 
         try:
-            process = start_broker(self.skill, self.job)
+            process = start_broker(self.skill, self.job, control_uri=self.control_uri)
             recovery["steps"].append({"op": "start_broker", "ok": True, "pid": process.pid})
         except Exception as exc:
             recovery["steps"].append({"op": "start_broker", "ok": False, "error": str(exc)})
@@ -176,17 +186,22 @@ class Executor:
         if engine == "premiere":
             timeout = float(a.get("timeout", 90))
             try:
-                return asyncio.run(ws_call(self.control_uri, self.secret, a.get("op"), a.get("args", {}), timeout))
-            except Exception as first_error:
-                activation = self.activate_premiere_fallback(min(timeout, 90))
-                if not activation.get("ok"):
-                    return {"ok": False, "error": str(first_error), "adobeActivation": activation}
-                try:
-                    result = asyncio.run(ws_call(self.control_uri, self.secret, a.get("op"), a.get("args", {}), timeout))
-                    result["adobeActivation"] = activation
-                    return result
-                except Exception as exc:
-                    return {"ok": False, "error": str(exc), "adobeActivation": activation}
+                first = asyncio.run(ws_call(self.control_uri, self.secret, a.get("op"), a.get("args", {}), timeout))
+            except Exception as exc:
+                first = {"ok": False, "error": str(exc)}
+            if first.get("ok"):
+                return first
+            if not premiere_needs_activation(first):
+                return first
+            activation = self.activate_premiere_fallback(min(timeout, 90))
+            if not activation.get("ok"):
+                return {**first, "adobeActivation": activation}
+            try:
+                result = asyncio.run(ws_call(self.control_uri, self.secret, a.get("op"), a.get("args", {}), timeout))
+                result["adobeActivation"] = activation
+                return result
+            except Exception as exc:
+                return {"ok": False, "error": str(exc), "adobeActivation": activation}
 
         if engine == "after_effects":
             payload = {"undoGroup": a.get("undoGroup", "Autonomous Editor"), "actions": a.get("actions", [a.get("action")])}

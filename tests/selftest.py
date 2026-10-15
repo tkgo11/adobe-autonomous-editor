@@ -118,14 +118,16 @@ def main():
     # --- In-process unit checks (stdlib-only modules; no Adobe host required) ---
     sys.path.insert(0, str(ROOT / "runtime"))
     sys.path.insert(0, str(ROOT / "scripts"))
-    import ae_rpc, analyze_media, bootstrap, crafting_apps, desktop_driver, platform_support, qc, source_inventory, toolchain  # noqa: E402
+    import ae_rpc, analyze_media, bootstrap, broker_util, crafting_apps, desktop_driver, initialize as initializer, platform_support, qc, source_inventory, toolchain  # noqa: E402
 
     check((ROOT / "scripts/provision_python.ps1").exists(), "Windows Python self-provisioner missing")
     check((ROOT / "scripts/provision_python.sh").exists(), "Unix Python self-provisioner missing")
     check((ROOT / "scripts/initialize_job.sh").exists(), "Unix initialize wrapper missing")
     requirements = (ROOT / "runtime/requirements.txt").read_text(encoding="utf-8")
-    check("static-ffmpeg==3.0" in requirements, "managed macOS ffmpeg provider missing from runtime requirements")
+    check("static-ffmpeg" not in requirements, "unverified macOS ffmpeg dependency must not be installed")
     check(toolchain._btbn_asset() is None or toolchain._btbn_asset().startswith("ffmpeg-master-latest-"), "managed ffmpeg asset selection failed")
+    check(toolchain._mac_asset_names("arm64") == ("ffmpeg-darwin-arm64", "ffprobe-darwin-arm64"), "macOS arm64 ffmpeg assets mismatch")
+    check(toolchain._mac_asset_names("x86_64") == ("ffmpeg-darwin-x64", "ffprobe-darwin-x64"), "macOS x64 ffmpeg assets mismatch")
     check(bootstrap._venv_python(Path("venv")).name in {"python", "python.exe"}, "venv Python resolution failed")
     original_path = os.environ.get("PATH", "")
     try:
@@ -143,6 +145,25 @@ def main():
     check(crafting_apps.payload_succeeded({"ok": True, "apps": {"filmcraft": {}}}), "aggregate Crafting Apps success payload failed")
     check(crafting_apps.payload_succeeded({"filmcraft": {"available": True}, "effectcraft": {"available": True}}), "Crafting Apps status success payload failed")
     check(not crafting_apps.payload_succeeded({"filmcraft": {"available": True}, "effectcraft": {"available": False}}), "Crafting Apps status failure payload passed")
+    broker_cmd = broker_util.broker_command(ROOT, Path("secret"), Path("state"), "ws://127.0.0.1:43210")
+    check(broker_cmd[broker_cmd.index("--control-port") + 1] == "43210", "custom broker control port was not propagated")
+    check(not initializer.should_prepare_adobe("crafting-first", True), "crafting-first initialization must defer Adobe startup")
+    check(initializer.should_prepare_adobe("adobe-only", True), "adobe-only auto initialization must prepare Adobe")
+    check(initializer.safe_ae_probe_plan() == {"actions": []}, "AE probe must not mutate or close a project")
+    check(
+        initializer.initialization_status("adobe-only", True, True, True, False, True, True, True, False, False, False, False) == "BLOCKED",
+        "adobe-only policy without Adobe must be blocked",
+    )
+    preferred = initializer.preferred_editors(
+        "crafting-first",
+        {"filmcraft": {"available": True}, "effectcraft": {"available": False}},
+        {"premiere": "Premiere", "afterfx": None},
+    )
+    check(preferred == ["filmcraft", "premiere"], "preferred editors must contain only available applications")
+    shell_installer = (ROOT / "install.sh").read_text(encoding="utf-8")
+    ps_installer = (ROOT / "install.ps1").read_text(encoding="utf-8")
+    check("replace_transactionally" in shell_installer and ".stage." in shell_installer, "Unix installer replacement is not staged")
+    check("Install-Transactionally" in ps_installer and ".stage." in ps_installer, "Windows installer replacement is not staged")
 
     # AE JSX generation: payload text must survive placeholder substitution and
     # ES3 line terminators must be escaped.
@@ -208,6 +229,18 @@ def main():
             check(craft_probe["available"] and "9.9.9" in craft_probe["version"], "Crafting Apps CLI probe failed")
             craft_run = crafting_apps.run_cli(str(fake_cli), ["inspect", "sequence"])
             check(craft_run["ok"] and craft_run["json"]["args"] == ["inspect", "sequence"], "Crafting Apps CLI invocation failed")
+
+            # Discovery must honor the successfully installed manifest instead
+            # of selecting an older release by directory sort order.
+            craft_root = td / "managed/crafting-apps/filmcraft"
+            old_cli = craft_root / "releases/0.8/bin/filmcraft-cli"
+            new_cli = craft_root / "releases/0.9/bin/filmcraft-cli"
+            for path in (old_cli, new_cli):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("#!/bin/sh\nexit 0\n")
+                path.chmod(0o755)
+            (craft_root / "install.json").write_text(json.dumps({"path": str(new_cli.resolve())}))
+            check(crafting_apps.discover("filmcraft", td / "managed") == str(new_cli.resolve()), "Crafting Apps manifest release was not preferred")
         else:
             skip("Crafting Apps fake CLI", "selftest fixture is POSIX-only")
         r = subprocess.run(
@@ -319,6 +352,25 @@ def main():
                 executor.env = {"tools": {}}
                 unavailable = executor.activate_premiere_fallback()
                 check(not unavailable["ok"] and "not installed" in unavailable["error"], "missing Premiere fallback was not reported cleanly")
+
+                # A normal broker response with ok:false must activate Premiere;
+                # recovery is not limited to socket exceptions.
+                executor.control_uri = "ws://127.0.0.1:8766"
+                executor.secret = "secret"
+                calls = []
+                original_ws_call = execute_plan.ws_call
+                original_activate = executor.activate_premiere_fallback
+                async def fake_ws_call(*args, **kwargs):
+                    calls.append(args)
+                    return {"ok": False, "error": "Premiere bridge is not connected"} if len(calls) == 1 else {"ok": True, "result": {"pong": True}}
+                try:
+                    execute_plan.ws_call = fake_ws_call
+                    executor.activate_premiere_fallback = lambda timeout=60: {"ok": True}
+                    recovered = executor.primitive({"engine": "premiere", "op": "ping", "args": {}})
+                finally:
+                    execute_plan.ws_call = original_ws_call
+                    executor.activate_premiere_fallback = original_activate
+                check(recovered.get("ok") and len(calls) == 2, "Premiere disconnected response did not trigger activation and retry")
 
             # initialize.py end-to-end: no readable sources -> BLOCKED contract artifacts.
             job = td / "job"
