@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Execute a machine-readable edit plan across Premiere, AE, desktop and QC.
+"""Execute a machine-readable edit plan across Crafting Apps, Adobe, desktop and QC.
 
 Each action can carry bounded retries, verification actions, and explicit fallbacks.
-This lets a job downgrade per operation (e.g. UXP -> UIA) without restarting the
-whole orchestration cycle.
+This lets a job downgrade per operation (e.g. FilmCraft -> Premiere -> platform
+desktop accessibility)
+without restarting the whole orchestration cycle.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import json
 import subprocess
 import sys
@@ -17,8 +19,32 @@ import uuid
 from pathlib import Path
 
 from ae_rpc import compile_jsx, dispatch as ae_dispatch
+from broker_util import start_broker
+from crafting_apps import run_cli as run_crafting_cli
 from desktop_driver import run_steps
+from platform_support import launch_application, upia_install_command
 from rpc_client import call as ws_call
+from toolchain import restore_media_path
+
+
+def ensure_transcription_runtime(skill: Path) -> dict:
+    """Install optional speech dependencies into the isolated job runtime."""
+    if importlib.util.find_spec("faster_whisper") is not None:
+        return {"ok": True, "installed": False}
+    requirements = skill / "runtime/requirements-ml.txt"
+    if not requirements.is_file():
+        return {"ok": False, "error": f"missing {requirements}"}
+    run = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "--requirement", str(requirements)],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=1800,
+    )
+    return {
+        "ok": run.returncode == 0 and importlib.util.find_spec("faster_whisper") is not None,
+        "installed": run.returncode == 0,
+        "returncode": run.returncode,
+        "stdout": run.stdout[-8000:],
+        "stderr": run.stderr[-8000:],
+    }
 
 
 def minimal_plan_check(plan):
@@ -65,11 +91,102 @@ class Executor:
         self.control_uri = control_uri
         self.secret = (job / "runtime/bridge-secret.txt").read_text(encoding="utf-8").strip()
         self.env = json.loads((job / "analysis/environment.json").read_text(encoding="utf-8"))
+        try:
+            self.capabilities = json.loads((job / "plans/capability_matrix.json").read_text(encoding="utf-8"))
+        except Exception:
+            self.capabilities = {}
+        restore_media_path(self.env)
+
+    def activate_premiere_fallback(self, timeout: float = 60) -> dict:
+        """Prepare Premiere only when a selected fallback actually needs it."""
+        recovery = {"ok": False, "attempted": True, "steps": []}
+        tools = self.env.get("tools") or {}
+        premiere = tools.get("premiere")
+        if not premiere:
+            recovery["error"] = "Premiere Pro is not installed"
+            return recovery
+
+        ccx = self.job / "runtime/com.autonomous-editor.bridge.ccx"
+        upia = tools.get("upia")
+        bridge_ready = bool((((self.capabilities.get("premiere") or {}).get("uxp_install") or {}).get("ok")))
+        if bridge_ready:
+            recovery["steps"].append({"op": "install_bridge", "ok": True, "reused": True})
+        elif upia and ccx.exists():
+            try:
+                install = subprocess.run(
+                    upia_install_command(upia, ccx), text=True, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, timeout=min(120, max(20, timeout)),
+                )
+                recovery["steps"].append({
+                    "op": "install_bridge", "ok": install.returncode == 0,
+                    "returncode": install.returncode, "stdout": install.stdout[-4000:],
+                    "stderr": install.stderr[-4000:],
+                })
+            except Exception as exc:
+                recovery["steps"].append({"op": "install_bridge", "ok": False, "error": str(exc)})
+        else:
+            missing = "Adobe UPIA not found" if not upia else f"bridge package not found: {ccx}"
+            recovery["steps"].append({"op": "install_bridge", "ok": False, "error": missing})
+
+        try:
+            process = start_broker(self.skill, self.job)
+            recovery["steps"].append({"op": "start_broker", "ok": True, "pid": process.pid})
+        except Exception as exc:
+            recovery["steps"].append({"op": "start_broker", "ok": False, "error": str(exc)})
+        try:
+            launch_application(premiere)
+            recovery["steps"].append({"op": "launch_premiere", "ok": True})
+        except Exception as exc:
+            recovery["steps"].append({"op": "launch_premiere", "ok": False, "error": str(exc)})
+            recovery["error"] = str(exc)
+            return recovery
+
+        deadline = time.time() + max(5, timeout)
+        last_error = None
+        while time.time() < deadline:
+            try:
+                ping = asyncio.run(ws_call(self.control_uri, self.secret, "ping", {}, 4, open_timeout=2, close_timeout=1))
+                if ping.get("ok"):
+                    recovery.update({"ok": True, "probe": ping})
+                    return recovery
+                last_error = ping.get("error")
+            except Exception as exc:
+                last_error = str(exc)
+            time.sleep(1)
+        recovery["error"] = last_error or "Premiere bridge did not connect before timeout"
+        return recovery
 
     def primitive(self, a):
         engine = a.get("engine")
+        if engine in {"filmcraft", "effectcraft"}:
+            tool_key = f"{engine}_cli"
+            executable = (self.env.get("tools") or {}).get(tool_key)
+            if not executable:
+                return {"ok": False, "error": f"{engine}-cli executable unavailable"}
+            argv = a.get("argv")
+            if not isinstance(argv, list) or not all(isinstance(x, (str, int, float)) for x in argv):
+                return {"ok": False, "error": f"{engine} action requires an argv array"}
+            return run_crafting_cli(
+                executable,
+                [str(x) for x in argv],
+                timeout=float(a.get("timeout", 3600)),
+                cwd=a.get("cwd"),
+            )
+
         if engine == "premiere":
-            return asyncio.run(ws_call(self.control_uri, self.secret, a.get("op"), a.get("args", {}), float(a.get("timeout", 90))))
+            timeout = float(a.get("timeout", 90))
+            try:
+                return asyncio.run(ws_call(self.control_uri, self.secret, a.get("op"), a.get("args", {}), timeout))
+            except Exception as first_error:
+                activation = self.activate_premiere_fallback(min(timeout, 90))
+                if not activation.get("ok"):
+                    return {"ok": False, "error": str(first_error), "adobeActivation": activation}
+                try:
+                    result = asyncio.run(ws_call(self.control_uri, self.secret, a.get("op"), a.get("args", {}), timeout))
+                    result["adobeActivation"] = activation
+                    return result
+                except Exception as exc:
+                    return {"ok": False, "error": str(exc), "adobeActivation": activation}
 
         if engine == "after_effects":
             payload = {"undoGroup": a.get("undoGroup", "Autonomous Editor"), "actions": a.get("actions", [a.get("action")])}
@@ -99,13 +216,16 @@ class Executor:
             return {"ok": p.returncode == 0, "returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr, "analysis": str(out)}
 
         if engine == "transcribe":
+            dependency = ensure_transcription_runtime(self.skill)
+            if not dependency.get("ok"):
+                return {"ok": False, "error": "could not provision local transcription runtime", "dependency": dependency}
             out_dir = Path(a.get("outDir", self.job / "analysis" / (Path(a["media"]).stem + "-transcript")))
             cmd = [sys.executable, str(self.skill / "runtime/transcribe.py"), a["media"], "--out-dir", str(out_dir), "--model", str(a.get("model", "large-v3"))]
             for flag, key in [("--language", "language"), ("--device", "device"), ("--compute-type", "computeType"), ("--backend", "backend")]:
                 if a.get(key) is not None:
                     cmd += [flag, str(a[key])]
             p = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=float(a.get("timeout", 7200)))
-            return {"ok": p.returncode == 0, "returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr, "outDir": str(out_dir)}
+            return {"ok": p.returncode == 0, "returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr, "outDir": str(out_dir), "dependency": dependency}
 
         if engine == "qc":
             out = Path(a.get("out", self.job / "qc" / (Path(a["media"]).name + ".json")))
@@ -203,7 +323,11 @@ def main():
 
     out = Path(plan.get("report", job / "logs/execution-report.json"))
     out.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"ok": all(x["result"].get("ok") for x in results), "results": results}
+    payload = {
+        "ok": all(x["result"].get("ok") for x in results),
+        "editorPolicy": plan.get("editorPolicy", "crafting-first"),
+        "results": results,
+    }
     out.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     raise SystemExit(0 if payload["ok"] else 2)

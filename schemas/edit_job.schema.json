@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://local.invalid/adobe-autonomous-editor/edit_job.schema.json",
-  "title": "Adobe Autonomous Editor Job",
+  "title": "Autonomous Video Editor Job",
   "type": "object",
   "required": [
     "job_id",
@@ -74,6 +74,14 @@
       "items": {
         "type": "string"
       }
+    },
+    "editor_policy": {
+      "type": "string",
+      "enum": [
+        "crafting-first",
+        "adobe-only"
+      ],
+      "default": "crafting-first"
     },
     "workflow": {
       "type": "object",

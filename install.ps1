@@ -10,13 +10,7 @@ $ErrorActionPreference = "Stop"
 $Repo = "https://github.com/tkgo11/adobe-autonomous-editor.git"
 $SkillName = "adobe-autonomous-editor"
 
-function Require-Command([string]$Name) {
-  if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
-    throw "Required command '$Name' was not found. Install it and rerun this installer."
-  }
-}
-
-Require-Command "git"
+$git = Get-Command git -ErrorAction SilentlyContinue
 
 if ($Scope -eq "User") {
   $homeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
@@ -32,22 +26,44 @@ New-Item -ItemType Directory -Force -Path $skillsRoot | Out-Null
 
 if (Test-Path -LiteralPath $destination) {
   $gitDir = Join-Path $destination ".git"
-  if (Test-Path -LiteralPath $gitDir) {
+  if ((Test-Path -LiteralPath $gitDir) -and $git) {
     Write-Host "Updating existing skill at $destination"
-    & git -C $destination pull --ff-only
+    & $git.Source -C $destination pull --ff-only
     if ($LASTEXITCODE -ne 0) { throw "git pull failed." }
-  } elseif ($Force) {
+  } elseif ($Force -or (Test-Path (Join-Path $destination ".installed-from-archive"))) {
     Write-Host "Replacing existing non-git directory at $destination"
     Remove-Item -LiteralPath $destination -Recurse -Force
-    & git clone --depth 1 $Repo $destination
-    if ($LASTEXITCODE -ne 0) { throw "git clone failed." }
+    if($git) {
+      & $git.Source clone --depth 1 $Repo $destination
+      if ($LASTEXITCODE -ne 0) { throw "git clone failed." }
+    } else {
+      $archive = Join-Path $env:TEMP "adobe-autonomous-editor-main.zip"
+      $expanded = Join-Path $env:TEMP ("adobe-autonomous-editor-install-" + [guid]::NewGuid().ToString("N"))
+      Invoke-WebRequest "https://github.com/tkgo11/adobe-autonomous-editor/archive/refs/heads/main.zip" -OutFile $archive -UseBasicParsing
+      Expand-Archive -LiteralPath $archive -DestinationPath $expanded -Force
+      Move-Item -LiteralPath (Join-Path $expanded "adobe-autonomous-editor-main") -Destination $destination
+      New-Item -ItemType File -Path (Join-Path $destination ".installed-from-archive") | Out-Null
+      Remove-Item -LiteralPath $expanded -Recurse -Force
+      Remove-Item -LiteralPath $archive -Force
+    }
   } else {
-    throw "Destination already exists and is not a git checkout: $destination`nRerun with -Force to replace it."
+    throw "Destination already exists and cannot be safely updated: $destination`nRerun with -Force to replace it."
   }
 } else {
   Write-Host "Installing $SkillName to $destination"
-  & git clone --depth 1 $Repo $destination
-  if ($LASTEXITCODE -ne 0) { throw "git clone failed." }
+  if($git) {
+    & $git.Source clone --depth 1 $Repo $destination
+    if ($LASTEXITCODE -ne 0) { throw "git clone failed." }
+  } else {
+    $archive = Join-Path $env:TEMP "adobe-autonomous-editor-main.zip"
+    $expanded = Join-Path $env:TEMP ("adobe-autonomous-editor-install-" + [guid]::NewGuid().ToString("N"))
+    Invoke-WebRequest "https://github.com/tkgo11/adobe-autonomous-editor/archive/refs/heads/main.zip" -OutFile $archive -UseBasicParsing
+    Expand-Archive -LiteralPath $archive -DestinationPath $expanded -Force
+    Move-Item -LiteralPath (Join-Path $expanded "adobe-autonomous-editor-main") -Destination $destination
+    New-Item -ItemType File -Path (Join-Path $destination ".installed-from-archive") | Out-Null
+    Remove-Item -LiteralPath $expanded -Recurse -Force
+    Remove-Item -LiteralPath $archive -Force
+  }
 }
 
 $skillFile = Join-Path $destination "SKILL.md"

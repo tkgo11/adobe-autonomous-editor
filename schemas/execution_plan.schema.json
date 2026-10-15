@@ -1,11 +1,19 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Autonomous Adobe Execution Plan",
+  "title": "Autonomous Video Editing Execution Plan",
   "type": "object",
   "required": [
     "actions"
   ],
   "properties": {
+    "editorPolicy": {
+      "type": "string",
+      "enum": [
+        "crafting-first",
+        "adobe-only"
+      ],
+      "default": "crafting-first"
+    },
     "report": {
       "type": "string"
     },
@@ -19,6 +27,8 @@
         "properties": {
           "engine": {
             "enum": [
+              "filmcraft",
+              "effectcraft",
               "premiere",
               "after_effects",
               "desktop",
@@ -34,6 +44,15 @@
           },
           "args": {
             "type": "object"
+          },
+          "argv": {
+            "type": "array",
+            "items": {
+              "type": ["string", "number"]
+            }
+          },
+          "cwd": {
+            "type": "string"
           },
           "actions": {
             "type": "array"

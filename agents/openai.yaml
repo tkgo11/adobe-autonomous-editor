@@ -1,4 +1,4 @@
 interface:
-  display_name: "Adobe Autonomous Editor"
-  short_description: "Autonomous Premiere Pro and After Effects editing"
-  default_prompt: "Use $adobe-autonomous-editor with my footage/assets and desired result."
+  display_name: "Autonomous Video Editor"
+  short_description: "Crafting Apps-first video editing with Adobe fallback"
+  default_prompt: "Use $adobe-autonomous-editor with my footage/assets and desired result. Prefer the FilmCraft and EffectCraft CLIs, then fall back to Adobe only for unavailable or failed features."

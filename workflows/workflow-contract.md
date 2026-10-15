@@ -10,7 +10,7 @@ When a module is selected, the orchestrator must:
 2. merge module defaults into `plans/edit_spec.json` only where the user did not specify a value;
 3. add module-specific analysis fields to `analysis/media_index.json`;
 4. emit module-specific planned events with stable IDs;
-5. select the highest reliable Adobe control surface for each operation;
+5. select FilmCraft or EffectCraft CLI for each eligible operation, with the matching Adobe surface only as an ordered fallback after a missing, failed, or unverifiable Crafting Apps capability;
 6. render and inspect an intermediate review before final export;
 7. run both universal QC and module-specific QC;
 8. repair failures automatically until acceptance criteria pass or a genuine blocker remains.

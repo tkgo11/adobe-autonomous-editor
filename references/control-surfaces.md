@@ -22,7 +22,7 @@ CEP has been superseded by UXP for new Premiere development. Keep a legacy adapt
 
 ### ExtendScript
 
-After Effects scripts are `.jsx`/`.jsxbin`. On Windows, an open AE instance can receive a script using `afterfx -r <absolute-script-path>`. Generated job-specific scripts are often the simplest reliable RPC mechanism.
+After Effects scripts are `.jsx`/`.jsxbin`. The Windows `AfterFX.exe` and macOS application binary accept `-r <absolute-script-path>`. Generated job-specific scripts are often the simplest reliable RPC mechanism.
 
 ### Expressions
 
@@ -40,5 +40,12 @@ For Windows:
 2. stable keyboard shortcuts
 3. AutoHotkey for deterministic flows
 4. vision-based Computer Use
+
+For macOS:
+
+1. System Events / AX Accessibility
+2. stable keyboard shortcuts and native menus
+3. CoreGraphics mouse events
+4. screenshots plus vision-based Computer Use
 
 Always normalize workspace/window state before UI automation and verify resulting project/render state afterward.

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import plistlib
 import py_compile
 import re
 import shutil
@@ -116,7 +118,31 @@ def main():
     # --- In-process unit checks (stdlib-only modules; no Adobe host required) ---
     sys.path.insert(0, str(ROOT / "runtime"))
     sys.path.insert(0, str(ROOT / "scripts"))
-    import ae_rpc, analyze_media, qc, source_inventory  # noqa: E402
+    import ae_rpc, analyze_media, bootstrap, crafting_apps, desktop_driver, platform_support, qc, source_inventory, toolchain  # noqa: E402
+
+    check((ROOT / "scripts/provision_python.ps1").exists(), "Windows Python self-provisioner missing")
+    check((ROOT / "scripts/provision_python.sh").exists(), "Unix Python self-provisioner missing")
+    check((ROOT / "scripts/initialize_job.sh").exists(), "Unix initialize wrapper missing")
+    requirements = (ROOT / "runtime/requirements.txt").read_text(encoding="utf-8")
+    check("static-ffmpeg==3.0" in requirements, "managed macOS ffmpeg provider missing from runtime requirements")
+    check(toolchain._btbn_asset() is None or toolchain._btbn_asset().startswith("ffmpeg-master-latest-"), "managed ffmpeg asset selection failed")
+    check(bootstrap._venv_python(Path("venv")).name in {"python", "python.exe"}, "venv Python resolution failed")
+    original_path = os.environ.get("PATH", "")
+    try:
+        toolchain.restore_media_path({"tools": {"ffmpeg": sys.executable}})
+        check(str(Path(sys.executable).parent.resolve()) in os.environ["PATH"].split(os.pathsep), "managed tool PATH was not restored")
+    finally:
+        os.environ["PATH"] = original_path
+
+    # Only the two video-related Crafting Apps are supported, and release
+    # selection must choose the official CLI-containing artifact per platform.
+    check(set(crafting_apps.APPS) == {"filmcraft", "effectcraft"}, "Crafting Apps scope must remain video-only")
+    check(crafting_apps.release_asset("filmcraft", "1.2.3", "Windows", "x86_64") == "filmcraft-1.2.3-windows-x64-portable.zip", "Windows FilmCraft asset mismatch")
+    check(crafting_apps.release_asset("effectcraft", "1.2.3", "Darwin", "aarch64") == "effectcraft-cli-1.2.3-macos-universal.zip", "macOS EffectCraft asset mismatch")
+    check(crafting_apps.release_asset("filmcraft", "1.2.3", "Linux", "aarch64") == "filmcraft-1.2.3-linux-aarch64.tar.gz", "Linux FilmCraft asset mismatch")
+    check(crafting_apps.payload_succeeded({"ok": True, "apps": {"filmcraft": {}}}), "aggregate Crafting Apps success payload failed")
+    check(crafting_apps.payload_succeeded({"filmcraft": {"available": True}, "effectcraft": {"available": True}}), "Crafting Apps status success payload failed")
+    check(not crafting_apps.payload_succeeded({"filmcraft": {"available": True}, "effectcraft": {"available": False}}), "Crafting Apps status failure payload passed")
 
     # AE JSX generation: payload text must survive placeholder substitution and
     # ES3 line terminators must be escaped.
@@ -146,6 +172,44 @@ def main():
     with tempfile.TemporaryDirectory() as td_raw:
         td = Path(td_raw)
         secret = "selftest-secret"
+
+        # macOS Adobe application bundles and UPIA are discovered without
+        # relying on Windows-only executable names.
+        mac_binary = td / "Applications/Adobe Premiere Pro 2026/Adobe Premiere Pro 2026.app/Contents/MacOS/Adobe Premiere Pro 2026"
+        mac_binary.parent.mkdir(parents=True)
+        mac_binary.write_text("#!/bin/sh\nexit 0\n")
+        mac_binary.chmod(0o755)
+        (mac_binary.parents[1] / "Info.plist").write_bytes(plistlib.dumps({"CFBundleShortVersionString": "26.1.0"}))
+        discovered = platform_support.find_adobe_tool("premiere", system="Darwin", roots=[td / "Applications"])
+        check(discovered == str(mac_binary.resolve()), "macOS Premiere bundle discovery failed")
+        check(platform_support.product_version(discovered, system="Darwin") == "26.1.0", "macOS Adobe version discovery failed")
+        mac_upia = td / "UPI/UnifiedPluginInstallerAgent.app/Contents/MacOS/UnifiedPluginInstallerAgent"
+        mac_upia.parent.mkdir(parents=True)
+        mac_upia.write_text("#!/bin/sh\nexit 0\n")
+        mac_upia.chmod(0o755)
+        check(platform_support.find_upia(system="Darwin", base=td / "UPI") == str(mac_upia), "macOS UPIA discovery failed")
+        check(platform_support.upia_install_command(str(mac_upia), "bridge.ccx", system="Darwin")[1] == "--install", "macOS UPIA switch mismatch")
+        scripts = []
+        original_osascript = desktop_driver._osascript
+        try:
+            desktop_driver._osascript = lambda source: scripts.append(source) or ""
+            desktop_driver._mac_key("s", ["command", "shift"])
+            desktop_driver._mac_click_control({"process": "Adobe Premiere Pro", "title": "Project"}, {"title": "Export", "control_type": "button"})
+        finally:
+            desktop_driver._osascript = original_osascript
+        check("command down" in scripts[0] and "shift down" in scripts[0], "macOS shortcut generation failed")
+        check("findElement" in scripts[1] and "AXButton" in scripts[1], "macOS accessibility action generation failed")
+
+        if sys.platform != "win32":
+            fake_cli = td / "filmcraft-cli"
+            fake_cli.write_text("#!/usr/bin/env python3\nimport json, sys\nprint('filmcraft-cli 9.9.9' if '--version' in sys.argv else json.dumps({'args': sys.argv[1:]}))\n")
+            fake_cli.chmod(0o755)
+            craft_probe = crafting_apps.probe("filmcraft", str(fake_cli))
+            check(craft_probe["available"] and "9.9.9" in craft_probe["version"], "Crafting Apps CLI probe failed")
+            craft_run = crafting_apps.run_cli(str(fake_cli), ["inspect", "sequence"])
+            check(craft_run["ok"] and craft_run["json"]["args"] == ["inspect", "sequence"], "Crafting Apps CLI invocation failed")
+        else:
+            skip("Crafting Apps fake CLI", "selftest fixture is POSIX-only")
         r = subprocess.run(
             [sys.executable, str(ROOT / "runtime/package_bridge.py"), "--template", str(ROOT / "templates/premiere-uxp"), "--out", str(td), "--secret", secret],
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -241,6 +305,20 @@ def main():
             good = td / "good.json"
             good.write_text(json.dumps({"actions": [{"engine": "shell", "argv": ["echo", "hi"]}]}))
             check(execute_plan.load_plan(good, ROOT)["actions"][0]["engine"] == "shell", "valid plan rejected")
+            craft_plan = td / "craft-plan.json"
+            craft_plan.write_text(json.dumps({"actions": [{
+                "engine": "filmcraft", "argv": ["inspect", "sequence"],
+                "fallbacks": [{"engine": "premiere", "op": "getProjectState"}],
+            }]}))
+            check(execute_plan.load_plan(craft_plan, ROOT)["actions"][0]["engine"] == "filmcraft", "Crafting Apps plan rejected")
+            if sys.platform != "win32":
+                executor = execute_plan.Executor.__new__(execute_plan.Executor)
+                executor.env = {"tools": {"filmcraft_cli": str(fake_cli)}}
+                result = executor.primitive({"engine": "filmcraft", "argv": ["inspect", "sequence"]})
+                check(result["ok"] and result["json"]["args"] == ["inspect", "sequence"], "FilmCraft execution-plan engine failed")
+                executor.env = {"tools": {}}
+                unavailable = executor.activate_premiere_fallback()
+                check(not unavailable["ok"] and "not installed" in unavailable["error"], "missing Premiere fallback was not reported cleanly")
 
             # initialize.py end-to-end: no readable sources -> BLOCKED contract artifacts.
             job = td / "job"
@@ -252,10 +330,12 @@ def main():
             check(r.returncode == 2, f"initialize should exit 2 when BLOCKED: {r.stderr[-400:]}")
             init = json.loads((job / "plans/init_state.json").read_text())
             for field in ("schema_version", "job_id", "status", "initialized_at", "job_root",
-                          "source_inventory", "environment", "capability_matrix", "next",
+                          "machine_state_dir", "source_inventory", "environment", "capability_matrix", "next",
                           "degraded_capabilities", "blockers", "notes"):
                 check(field in init, f"init_state missing documented field {field}")
             check(init["status"] == "BLOCKED" and init["blockers"], "init_state should be BLOCKED with blockers")
+            check(init["editor_priority"] == "crafting-first", "Crafting Apps-first must be the default policy")
+            check((Path(init["machine_state_dir"]) / "bridge-secret.txt").exists(), "machine state secret missing")
             check((job / "logs/initialize.log").stat().st_size > 0, "initialize.log not written")
             check(list((job / "recovery/init-history").glob("init-*.json")), "init history snapshot missing")
 
