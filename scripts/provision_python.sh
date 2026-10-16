@@ -13,12 +13,24 @@ UV_ROOT="$RUNTIME_DIR/uv-bootstrap"
 mkdir -p "$RUNTIME_DIR"
 
 compatible_python() {
-  local candidate resolved
+  local candidate resolved probe_dir probe_python
   for candidate in python3 python; do
     if command -v "$candidate" >/dev/null 2>&1; then
       if resolved=$("$candidate" -c 'import sys; assert sys.version_info >= (3,10); print(sys.executable)' 2>/dev/null); then
-        printf '%s\n' "$resolved"
-        return 0
+        # Importing venv is not sufficient on distributions that split the
+        # ensurepip payload into a separate package (for example Debian's
+        # python3-venv). Prove that this interpreter can create the pip-enabled
+        # environment bootstrap.py will need before accepting it.
+        probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/aae-python-probe.XXXXXX")
+        if "$resolved" -m venv "$probe_dir/venv" >/dev/null 2>&1; then
+          probe_python="$probe_dir/venv/bin/python"
+          if [[ -x "$probe_python" ]] && "$probe_python" -m pip --version >/dev/null 2>&1; then
+            rm -rf -- "$probe_dir"
+            printf '%s\n' "$resolved"
+            return 0
+          fi
+        fi
+        rm -rf -- "$probe_dir"
       fi
     fi
   done

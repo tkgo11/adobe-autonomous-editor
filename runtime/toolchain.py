@@ -68,14 +68,33 @@ def _download(url: str, destination: Path) -> None:
         partial.unlink(missing_ok=True)
 
 
-def _btbn_asset() -> str | None:
-    machine = platform.machine().lower()
+def _is_musl_linux(system: str | None = None, libc: str | None = None) -> bool:
+    system = system or platform.system()
+    if system != "Linux":
+        return False
+    if libc is not None:
+        return "musl" in libc.lower()
+    detected_libc = platform.libc_ver()[0].lower()
+    if "musl" in detected_libc:
+        return True
+    if any(Path("/lib").glob("ld-musl-*.so.1")):
+        return True
+    try:
+        run = subprocess.run(["ldd", "--version"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+        return "musl" in (run.stdout + run.stderr).lower()
+    except Exception:
+        return False
+
+
+def _btbn_asset(system: str | None = None, machine: str | None = None, libc: str | None = None) -> str | None:
+    system = system or platform.system()
+    machine = (machine or platform.machine()).lower()
     arch = "64" if machine in {"x86_64", "amd64", "x64"} else "arm64" if machine in {"arm64", "aarch64"} else None
     if not arch:
         return None
-    if platform.system() == "Windows":
+    if system == "Windows":
         return f"ffmpeg-master-latest-win{arch}-gpl.zip"
-    if platform.system() == "Linux":
+    if system == "Linux" and not _is_musl_linux(system, libc):
         return f"ffmpeg-master-latest-linux{arch}-gpl.tar.xz"
     return None
 
@@ -170,18 +189,25 @@ def _install_btbn(root: Path, asset: str) -> tuple[str, str, dict]:
     return str(ffmpeg), str(ffprobe), {"asset": asset, "archive_sha256": actual, "expected_sha256": expected}
 
 
-def _mac_asset_names(machine: str | None = None) -> tuple[str, str]:
+def _static_asset_names(system: str, machine: str | None = None) -> tuple[str, str]:
     machine = (machine or platform.machine()).lower()
     arch = "arm64" if machine in {"arm64", "aarch64"} else "x64" if machine in {"x86_64", "amd64", "x64"} else None
     if not arch:
-        raise RuntimeError(f"no managed macOS ffmpeg distribution for {machine}")
-    return f"ffmpeg-darwin-{arch}", f"ffprobe-darwin-{arch}"
+        raise RuntimeError(f"no managed ffmpeg-static distribution for {system}/{machine}")
+    os_name = {"Darwin": "darwin", "Linux": "linux"}.get(system)
+    if not os_name:
+        raise RuntimeError(f"no managed ffmpeg-static distribution for {system}/{machine}")
+    return f"ffmpeg-{os_name}-{arch}", f"ffprobe-{os_name}-{arch}"
 
 
-def _install_macos(root: Path) -> tuple[str, str, dict]:
+def _mac_asset_names(machine: str | None = None) -> tuple[str, str]:
+    return _static_asset_names("Darwin", machine)
+
+
+def _install_static(root: Path, system: str) -> tuple[str, str, dict]:
     repo = "eugeneware/ffmpeg-static"
     tag = _latest_release_tag(repo)
-    assets = _mac_asset_names()
+    assets = _static_asset_names(system)
     target = root / "releases" / tag
     downloads = root / "downloads" / tag
     paths = []
@@ -201,6 +227,10 @@ def _install_macos(root: Path) -> tuple[str, str, dict]:
         paths.append(str(installed.resolve()))
         digests[asset] = actual
     return paths[0], paths[1], {"provider": repo, "tag": tag, "sha256": digests}
+
+
+def _install_macos(root: Path) -> tuple[str, str, dict]:
+    return _install_static(root, "Darwin")
 
 
 def ensure_media_tools(state_dir: Path) -> dict:
@@ -246,6 +276,11 @@ def ensure_media_tools(state_dir: Path) -> dict:
             ffmpeg, ffprobe, provenance = _install_btbn(root, asset)
         elif platform.system() == "Darwin":
             ffmpeg, ffprobe, provenance = _install_macos(root)
+        elif _is_musl_linux():
+            # BtbN Linux releases require glibc. The ffmpeg-static project
+            # publishes fully static Linux binaries and SHA-256 digests, so it
+            # is safe to use on musl distributions such as Alpine.
+            ffmpeg, ffprobe, provenance = _install_static(root, "Linux")
         else:
             raise RuntimeError(f"no managed ffmpeg distribution for {platform.system()}/{platform.machine()}")
         paths = {"ffmpeg": str(Path(ffmpeg).resolve()), "ffprobe": str(Path(ffprobe).resolve())}

@@ -63,7 +63,11 @@ tell application "System Events"
     set pn to name of p
     repeat with w in windows of p
       try
-        set end of rows to pn & tab & (name of w)
+        set windowNumber to ""
+        try
+          set windowNumber to (value of attribute "AXWindowNumber" of w) as text
+        end try
+        set end of rows to pn & tab & (name of w) & tab & windowNumber
       end try
     end repeat
   end repeat
@@ -73,9 +77,11 @@ return rows as text
 '''
     rows = []
     for line in _osascript(source).splitlines():
-        if "\t" in line:
-            process, title = line.split("\t", 1)
-            rows.append({"process": process, "title": title})
+        parts = line.split("\t", 2)
+        if len(parts) >= 2:
+            process, title = parts[:2]
+            window_id = parts[2].strip() if len(parts) == 3 else ""
+            rows.append({"process": process, "title": title, "window_id": window_id or None})
     return rows
 
 
@@ -89,11 +95,19 @@ def _mac_find_window(title_re):
 
 def _mac_focus(window):
     process = _as_string(window["process"])
-    _osascript(f'tell application "System Events" to tell process "{process}" to set frontmost to true')
+    title = _as_string(window["title"])
+    _osascript(f'''
+tell application "System Events" to tell process "{process}"
+  set frontmost to true
+  set targetWindow to first window whose name is "{title}"
+  perform action "AXRaise" of targetWindow
+end tell
+''')
 
 
 def _mac_click_control(window, step, set_text=None):
     process = _as_string(window["process"])
+    window_title = _as_string(window["title"])
     title = _as_string(step.get("title") or step.get("name") or "")
     if not title:
         raise RuntimeError("macOS accessibility action requires title")
@@ -128,7 +142,8 @@ end findElement
 tell application "System Events"
   tell process "{process}"
     set frontmost to true
-    set hit to my findElement(front window, "{title}", "{ax_role}")
+    set targetWindow to first window whose name is "{window_title}"
+    set hit to my findElement(targetWindow, "{title}", "{ax_role}")
     if hit is missing value then error "Accessibility element not found: {title}"
     {action}
   end tell
@@ -175,19 +190,37 @@ def _mac_mouse(x, y, click=False):
 
 def _mac_dump_tree(window, limit=1500):
     process = _as_string(window["process"])
+    title = _as_string(window["title"])
     source = f'''
-set rows to {{}}
-tell application "System Events" to tell process "{process}"
-  set elements to entire contents of front window
-  repeat with e in elements
-    if (count of rows) is greater than {int(limit)} then exit repeat
+property outputRows : {{}}
+property rowLimit : {max(0, int(limit))}
+
+on walkElement(e)
+  if (count of my outputRows) is greater than or equal to my rowLimit then return
+  tell application "System Events"
     try
-      set end of rows to (role of e as text) & tab & (name of e as text) & tab & (description of e as text)
+      set end of my outputRows to (role of e as text) & tab & (name of e as text) & tab & (description of e as text)
     end try
+    if (count of my outputRows) is greater than or equal to my rowLimit then return
+    try
+      set childElements to UI elements of e
+    on error
+      set childElements to {{}}
+    end try
+  end tell
+  repeat with childElement in childElements
+    my walkElement(childElement)
+    if (count of my outputRows) is greater than or equal to my rowLimit then exit repeat
   end repeat
+end walkElement
+
+set outputRows to {{}}
+tell application "System Events" to tell process "{process}"
+  set targetWindow to first window whose name is "{title}"
+  my walkElement(targetWindow)
 end tell
 set AppleScript's text item delimiters to linefeed
-return rows as text
+return outputRows as text
 '''
     return [{"role": parts[0], "name": parts[1], "description": parts[2]} for line in _osascript(source).splitlines() if len(parts := line.split("\t", 2)) == 3]
 
@@ -241,7 +274,15 @@ def _run_steps_macos(steps):
             elif op=="screenshot":
                 path=Path(s["path"]).resolve();path.parent.mkdir(parents=True,exist_ok=True)
                 capture=shutil.which("screencapture") or "/usr/sbin/screencapture"
-                run=subprocess.run([capture,"-x",str(path)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=30)
+                command=[capture,"-x"]
+                if s.get("windowOnly",True):
+                    if current is None:
+                        raise RuntimeError("windowOnly screenshot requires a focused or waited-for window")
+                    if not current.get("window_id"):
+                        raise RuntimeError("selected macOS window does not expose AXWindowNumber")
+                    command.extend(["-l",str(current["window_id"])])
+                command.append(str(path))
+                run=subprocess.run(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=30)
                 if run.returncode: raise RuntimeError(run.stderr.strip())
                 results.append({"index":i,"op":op,"ok":True,"path":str(path)});continue
             elif op=="dump_tree":

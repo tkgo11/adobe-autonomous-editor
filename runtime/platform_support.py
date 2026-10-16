@@ -50,10 +50,14 @@ def find_adobe_tool(kind: str, system: str | None = None, roots: list[Path] | No
             if root.exists():
                 for pattern in MAC_PATTERNS[kind]:
                     hits.extend(root.glob(pattern))
-    for name in PATH_NAMES[kind]:
-        path = shutil.which(name)
-        if path:
-            hits.append(Path(path))
+    # Adobe desktop hosts exist only on Windows and macOS. Do not let an
+    # unrelated Linux executable named "premiere" or "afterfx" masquerade as
+    # an installed Adobe application.
+    if system in {"Windows", "Darwin"}:
+        for name in PATH_NAMES[kind]:
+            path = shutil.which(name)
+            if path:
+                hits.append(Path(path))
     files = [path.resolve() for path in hits if path.is_file() and os.access(path, os.X_OK)]
     return str(sorted(files, key=lambda path: str(path), reverse=True)[0]) if files else None
 

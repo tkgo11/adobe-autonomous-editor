@@ -126,6 +126,8 @@ def main():
     requirements = (ROOT / "runtime/requirements.txt").read_text(encoding="utf-8")
     check("static-ffmpeg" not in requirements, "unverified macOS ffmpeg dependency must not be installed")
     check(toolchain._btbn_asset() is None or toolchain._btbn_asset().startswith("ffmpeg-master-latest-"), "managed ffmpeg asset selection failed")
+    check(toolchain._btbn_asset(system="Linux", machine="x86_64", libc="musl") is None, "musl Linux must not select a glibc BtbN build")
+    check(toolchain._static_asset_names("Linux", "x86_64") == ("ffmpeg-linux-x64", "ffprobe-linux-x64"), "musl Linux static ffmpeg assets mismatch")
     check(toolchain._mac_asset_names("arm64") == ("ffmpeg-darwin-arm64", "ffprobe-darwin-arm64"), "macOS arm64 ffmpeg assets mismatch")
     check(toolchain._mac_asset_names("x86_64") == ("ffmpeg-darwin-x64", "ffprobe-darwin-x64"), "macOS x64 ffmpeg assets mismatch")
     check(bootstrap._venv_python(Path("venv")).name in {"python", "python.exe"}, "venv Python resolution failed")
@@ -194,6 +196,26 @@ def main():
         td = Path(td_raw)
         secret = "selftest-secret"
 
+        # A version-compatible Python that cannot create a pip-enabled venv
+        # must be skipped in favor of the managed interpreter.
+        fake_bin = td / "fake-python-bin"
+        fake_bin.mkdir()
+        fake_python = fake_bin / "python3"
+        fake_python.write_text("#!/bin/sh\ncase \"$1\" in -c) printf '%s\\n' \"$0\"; exit 0;; esac\nexit 1\n")
+        fake_python.chmod(0o755)
+        (fake_bin / "python").symlink_to(fake_python)
+        python_job = td / "python-job"
+        managed_python = python_job / "runtime/python-base/current/bin/python3"
+        managed_python.parent.mkdir(parents=True)
+        managed_python.write_text("#!/bin/sh\nexit 0\n")
+        managed_python.chmod(0o755)
+        python_probe = subprocess.run(
+            ["bash", str(ROOT / "scripts/provision_python.sh"), str(python_job)],
+            env={**os.environ, "PATH": os.pathsep.join([str(fake_bin), os.environ.get("PATH", "")])},
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        check(python_probe.returncode == 0 and python_probe.stdout.strip() == str(managed_python), "Python without working venv support was accepted")
+
         # macOS Adobe application bundles and UPIA are discovered without
         # relying on Windows-only executable names.
         mac_binary = td / "Applications/Adobe Premiere Pro 2026/Adobe Premiere Pro 2026.app/Contents/MacOS/Adobe Premiere Pro 2026"
@@ -210,16 +232,55 @@ def main():
         mac_upia.chmod(0o755)
         check(platform_support.find_upia(system="Darwin", base=td / "UPI") == str(mac_upia), "macOS UPIA discovery failed")
         check(platform_support.upia_install_command(str(mac_upia), "bridge.ccx", system="Darwin")[1] == "--install", "macOS UPIA switch mismatch")
+        fake_premiere = fake_bin / "premiere"
+        fake_premiere.write_text("#!/bin/sh\nexit 0\n")
+        fake_premiere.chmod(0o755)
+        old_path = os.environ.get("PATH", "")
+        try:
+            os.environ["PATH"] = os.pathsep.join([str(fake_bin), old_path])
+            check(platform_support.find_adobe_tool("premiere", system="Linux") is None, "Linux PATH alias was mistaken for Adobe Premiere Pro")
+        finally:
+            os.environ["PATH"] = old_path
         scripts = []
         original_osascript = desktop_driver._osascript
         try:
             desktop_driver._osascript = lambda source: scripts.append(source) or ""
             desktop_driver._mac_key("s", ["command", "shift"])
-            desktop_driver._mac_click_control({"process": "Adobe Premiere Pro", "title": "Project"}, {"title": "Export", "control_type": "button"})
+            mac_window = {"process": "Adobe Premiere Pro", "title": "Project", "window_id": "4242"}
+            desktop_driver._mac_click_control(mac_window, {"title": "Export", "control_type": "button"})
+            desktop_driver._mac_focus(mac_window)
+            desktop_driver._mac_dump_tree(mac_window, 3)
         finally:
             desktop_driver._osascript = original_osascript
         check("command down" in scripts[0] and "shift down" in scripts[0], "macOS shortcut generation failed")
-        check("findElement" in scripts[1] and "AXButton" in scripts[1], "macOS accessibility action generation failed")
+        check("findElement" in scripts[1] and "AXButton" in scripts[1] and 'whose name is "Project"' in scripts[1], "macOS accessibility action generation failed")
+        check('perform action "AXRaise"' in scripts[2] and 'whose name is "Project"' in scripts[2], "macOS focus did not raise the matched window")
+        check("entire contents" not in scripts[3] and "walkElement" in scripts[3] and "rowLimit : 3" in scripts[3], "macOS accessibility traversal is not bounded during recursion")
+
+        screenshot_commands = []
+        original_find = desktop_driver._mac_find_window
+        original_focus = desktop_driver._mac_focus
+        original_run = desktop_driver.subprocess.run
+        original_which = desktop_driver.shutil.which
+        try:
+            desktop_driver._mac_find_window = lambda title: mac_window
+            desktop_driver._mac_focus = lambda window: None
+            desktop_driver.shutil.which = lambda name: "/usr/sbin/screencapture" if name == "screencapture" else original_which(name)
+            def fake_capture(command, **kwargs):
+                screenshot_commands.append(command)
+                return subprocess.CompletedProcess(command, 0, "", "")
+            desktop_driver.subprocess.run = fake_capture
+            screenshot_result = desktop_driver._run_steps_macos([
+                {"op": "focus_window", "title_re": "Project", "timeout": 0.1},
+                {"op": "screenshot", "path": str(td / "window.png"), "windowOnly": True},
+            ])
+        finally:
+            desktop_driver._mac_find_window = original_find
+            desktop_driver._mac_focus = original_focus
+            desktop_driver.subprocess.run = original_run
+            desktop_driver.shutil.which = original_which
+        check(all(row["ok"] for row in screenshot_result), "macOS window screenshot failed")
+        check(screenshot_commands and screenshot_commands[0][1:4] == ["-x", "-l", "4242"], "macOS window screenshot did not target AXWindowNumber")
 
         if sys.platform != "win32":
             fake_cli = td / "filmcraft-cli"
@@ -254,6 +315,12 @@ def main():
             check("manifest.json" in z.namelist(), "manifest missing from ccx")
             cfg = z.read("runtime-config.js").decode()
             check(secret in cfg, "secret not injected")
+        deterministic_dir = td / "deterministic"
+        r = subprocess.run(
+            [sys.executable, str(ROOT / "runtime/package_bridge.py"), "--template", str(ROOT / "templates/premiere-uxp"), "--out", str(deterministic_dir), "--secret", secret],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        check(r.returncode == 0 and Path(r.stdout.strip()).read_bytes() == ccx.read_bytes(), "bridge package digest is not stable across jobs")
 
         # A secret containing quotes/newlines must not break out of the JS string.
         hostile = 'x";process.exit(1);//\n'
@@ -320,7 +387,7 @@ def main():
                     raise AssertionError("minimal_plan_check accepted invalid plan")
                 except SystemExit:
                     pass
-            execute_plan.minimal_plan_check({"actions": [{"engine": "shell"}]})
+            execute_plan.minimal_plan_check({"actions": [{"engine": "shell", "argv": ["echo"]}]})
             bad_plan = td / "bad-plan.json"
             bad_plan.write_text("{not json")
             try:
@@ -335,6 +402,13 @@ def main():
                 raise AssertionError("load_plan accepted action without engine")
             except SystemExit:
                 pass
+            numeric_shell = td / "numeric-shell.json"
+            numeric_shell.write_text(json.dumps({"actions": [{"engine": "shell", "argv": ["echo", 1]}]}))
+            try:
+                execute_plan.load_plan(numeric_shell, ROOT)
+                raise AssertionError("load_plan accepted a numeric shell argument")
+            except SystemExit:
+                pass
             good = td / "good.json"
             good.write_text(json.dumps({"actions": [{"engine": "shell", "argv": ["echo", "hi"]}]}))
             check(execute_plan.load_plan(good, ROOT)["actions"][0]["engine"] == "shell", "valid plan rejected")
@@ -344,6 +418,21 @@ def main():
                 "fallbacks": [{"engine": "premiere", "op": "getProjectState"}],
             }]}))
             check(execute_plan.load_plan(craft_plan, ROOT)["actions"][0]["engine"] == "filmcraft", "Crafting Apps plan rejected")
+            check(execute_plan.validate_editor_policy({"actions": [{"engine": "premiere"}]}, "adobe-only") == "adobe-only", "Adobe-only policy rejected Adobe action")
+            for policy_plan in (
+                {"editorPolicy": "crafting-first", "actions": [{"engine": "premiere"}]},
+                {"actions": [{"engine": "premiere", "fallbacks": [{"engine": "filmcraft", "argv": ["inspect"]}]}]},
+            ):
+                try:
+                    execute_plan.validate_editor_policy(policy_plan, "adobe-only")
+                    raise AssertionError("Adobe-only initialized policy accepted a conflicting plan")
+                except SystemExit:
+                    pass
+            marker_executor = execute_plan.Executor.__new__(execute_plan.Executor)
+            marker_executor.bridge_marker = td / "machine-state/premiere-bridge-install.json"
+            marker_executor.persist_bridge_marker("abc123", td / "bridge.ccx")
+            check(marker_executor.bridge_marker_matches("abc123"), "Premiere bridge marker was not persisted or reused")
+            check(not marker_executor.bridge_marker_matches("different"), "stale Premiere bridge marker was reused")
             if sys.platform != "win32":
                 executor = execute_plan.Executor.__new__(execute_plan.Executor)
                 executor.env = {"tools": {"filmcraft_cli": str(fake_cli)}}

@@ -54,6 +54,10 @@ def minimal_plan_check(plan):
     for i, action in enumerate(plan["actions"]):
         if not isinstance(action, dict) or "engine" not in action:
             raise SystemExit(f"Invalid plan: action[{i}] must be an object with an 'engine' field")
+        if action.get("engine") == "shell":
+            argv = action.get("argv")
+            if not isinstance(argv, list) or not argv or not all(isinstance(value, str) for value in argv):
+                raise SystemExit(f"Invalid plan: shell action[{i}] requires a non-empty string-only argv array")
 
 
 def load_plan(plan_path: Path, skill: Path):
@@ -94,6 +98,49 @@ def premiere_needs_activation(result: dict) -> bool:
     ))
 
 
+def _read_json(path: Path) -> dict:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
+def _walk_actions(actions):
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        yield action
+        verify = action.get("verify")
+        if isinstance(verify, dict):
+            yield from _walk_actions([verify])
+        elif isinstance(verify, list):
+            yield from _walk_actions(verify)
+        fallbacks = action.get("fallbacks")
+        if isinstance(fallbacks, list):
+            yield from _walk_actions(fallbacks)
+
+
+def validate_editor_policy(plan: dict, initialized_policy: str) -> str:
+    """Require the plan to stay within the policy recorded at initialization."""
+    if initialized_policy not in {"crafting-first", "adobe-only"}:
+        raise SystemExit("Execution requires an initialized editor policy in capability_matrix.json or init_state.json")
+    requested = plan.get("editorPolicy")
+    if requested is not None and requested != initialized_policy:
+        raise SystemExit(
+            f"Plan editorPolicy {requested!r} does not match initialized policy {initialized_policy!r}; reinitialize the job to change policy"
+        )
+    if initialized_policy == "adobe-only":
+        violations = [
+            action.get("engine") for action in _walk_actions(plan.get("actions", []))
+            if action.get("engine") in {"filmcraft", "effectcraft"}
+        ]
+        if violations:
+            engines = ", ".join(sorted(set(violations)))
+            raise SystemExit(f"Adobe-only policy forbids Crafting Apps actions: {engines}")
+    return initialized_policy
+
+
 class Executor:
     def __init__(self, job: Path, skill: Path, control_uri: str):
         self.job = job
@@ -101,11 +148,33 @@ class Executor:
         self.control_uri = control_uri
         self.secret = (job / "runtime/bridge-secret.txt").read_text(encoding="utf-8").strip()
         self.env = json.loads((job / "analysis/environment.json").read_text(encoding="utf-8"))
-        try:
-            self.capabilities = json.loads((job / "plans/capability_matrix.json").read_text(encoding="utf-8"))
-        except Exception:
-            self.capabilities = {}
+        self.capabilities = _read_json(job / "plans/capability_matrix.json")
+        self.init_state = _read_json(job / "plans/init_state.json")
+        self.editor_policy = (
+            ((self.capabilities.get("routing") or {}).get("policy"))
+            or self.init_state.get("editor_priority")
+        )
+        state_dir = self.init_state.get("machine_state_dir")
+        self.bridge_marker = Path(state_dir) / "premiere-bridge-install.json" if state_dir else None
         restore_media_path(self.env)
+
+    def bridge_marker_matches(self, package_hash: str | None) -> bool:
+        if not self.bridge_marker or not package_hash:
+            return False
+        marker = _read_json(self.bridge_marker)
+        return marker.get("ok") is True and marker.get("package_sha256") == package_hash
+
+    def persist_bridge_marker(self, package_hash: str, ccx: Path) -> None:
+        if not self.bridge_marker:
+            return
+        self.bridge_marker.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "ok": True, "package_sha256": package_hash,
+            "installed_at": time.time(), "ccx": str(ccx),
+        }
+        temporary = self.bridge_marker.with_name(self.bridge_marker.name + f".{uuid.uuid4().hex}.tmp")
+        temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        temporary.replace(self.bridge_marker)
 
     def activate_premiere_fallback(self, timeout: float = 60) -> dict:
         """Prepare Premiere only when a selected fallback actually needs it."""
@@ -118,7 +187,9 @@ class Executor:
 
         ccx = self.job / "runtime/com.autonomous-editor.bridge.ccx"
         upia = tools.get("upia")
-        bridge_ready = bool((((self.capabilities.get("premiere") or {}).get("uxp_install") or {}).get("ok")))
+        install_capability = ((self.capabilities.get("premiere") or {}).get("uxp_install") or {})
+        package_hash = install_capability.get("package_sha256")
+        bridge_ready = bool(install_capability.get("ok")) or self.bridge_marker_matches(package_hash)
         if bridge_ready:
             recovery["steps"].append({"op": "install_bridge", "ok": True, "reused": True})
         elif upia and ccx.exists():
@@ -127,11 +198,17 @@ class Executor:
                     upia_install_command(upia, ccx), text=True, stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE, timeout=min(120, max(20, timeout)),
                 )
-                recovery["steps"].append({
+                install_step = {
                     "op": "install_bridge", "ok": install.returncode == 0,
                     "returncode": install.returncode, "stdout": install.stdout[-4000:],
                     "stderr": install.stderr[-4000:],
-                })
+                }
+                recovery["steps"].append(install_step)
+                if install.returncode == 0 and package_hash:
+                    try:
+                        self.persist_bridge_marker(package_hash, ccx)
+                    except Exception as exc:
+                        install_step["marker_error"] = str(exc)
             except Exception as exc:
                 recovery["steps"].append({"op": "install_bridge", "ok": False, "error": str(exc)})
         else:
@@ -261,7 +338,10 @@ class Executor:
             return {"ok": p.returncode == 0, "returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr, "packet": str(out_dir / "review-packet.json")}
 
         if engine == "shell":
-            p = subprocess.run(a["argv"], cwd=a.get("cwd"), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=float(a.get("timeout", 300)))
+            argv = a.get("argv")
+            if not isinstance(argv, list) or not argv or not all(isinstance(value, str) for value in argv):
+                return {"ok": False, "error": "shell action requires a non-empty string-only argv array"}
+            p = subprocess.run(argv, cwd=a.get("cwd"), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=float(a.get("timeout", 300)))
             return {"ok": p.returncode == 0, "returncode": p.returncode, "stdout": p.stdout[-16000:], "stderr": p.stderr[-16000:]}
 
         raise RuntimeError(f"Unknown engine: {engine}")
@@ -327,6 +407,7 @@ def main():
         ex = Executor(job, skill, ns.control_uri)
     except Exception as exc:
         raise SystemExit(f"Executor init failed for job {job}: {exc}")
+    editor_policy = validate_editor_policy(plan, ex.editor_policy)
     results = []
 
     for i, action in enumerate(plan["actions"]):
@@ -340,7 +421,7 @@ def main():
     out.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "ok": all(x["result"].get("ok") for x in results),
-        "editorPolicy": plan.get("editorPolicy", "crafting-first"),
+        "editorPolicy": editor_policy,
         "results": results,
     }
     out.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
