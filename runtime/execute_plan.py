@@ -51,13 +51,25 @@ def minimal_plan_check(plan):
     """Structural fallback when the jsonschema package/schema is unavailable."""
     if not isinstance(plan, dict) or not isinstance(plan.get("actions"), list):
         raise SystemExit("Invalid plan: expected a JSON object with an 'actions' array")
-    for i, action in enumerate(plan["actions"]):
+    def check_action(action, location):
         if not isinstance(action, dict) or "engine" not in action:
-            raise SystemExit(f"Invalid plan: action[{i}] must be an object with an 'engine' field")
+            raise SystemExit(f"Invalid plan: {location} must be an object with an 'engine' field")
         if action.get("engine") == "shell":
             argv = action.get("argv")
             if not isinstance(argv, list) or not argv or not all(isinstance(value, str) for value in argv):
-                raise SystemExit(f"Invalid plan: shell action[{i}] requires a non-empty string-only argv array")
+                raise SystemExit(f"Invalid plan: shell {location} requires a non-empty string-only argv array")
+        verify = action.get("verify")
+        checks = verify if isinstance(verify, list) else [verify] if verify is not None else []
+        for index, check in enumerate(checks):
+            check_action(check, f"{location}.verify[{index}]")
+        fallbacks = action.get("fallbacks", [])
+        if not isinstance(fallbacks, list):
+            raise SystemExit(f"Invalid plan: {location}.fallbacks must be an array")
+        for index, fallback in enumerate(fallbacks):
+            check_action(fallback, f"{location}.fallbacks[{index}]")
+
+    for i, action in enumerate(plan["actions"]):
+        check_action(action, f"action[{i}]")
 
 
 def load_plan(plan_path: Path, skill: Path):

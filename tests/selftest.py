@@ -123,6 +123,8 @@ def main():
     check((ROOT / "scripts/provision_python.ps1").exists(), "Windows Python self-provisioner missing")
     check((ROOT / "scripts/provision_python.sh").exists(), "Unix Python self-provisioner missing")
     check((ROOT / "scripts/initialize_job.sh").exists(), "Unix initialize wrapper missing")
+    windows_provisioner = (ROOT / "scripts/provision_python.ps1").read_text(encoding="utf-8")
+    check("function Test-PipVenv" in windows_provisioner and "-m venv" in windows_provisioner and "-m pip --version" in windows_provisioner, "Windows Python compatibility probe does not verify a pip-enabled venv")
     requirements = (ROOT / "runtime/requirements.txt").read_text(encoding="utf-8")
     check("static-ffmpeg" not in requirements, "unverified macOS ffmpeg dependency must not be installed")
     check(toolchain._btbn_asset() is None or toolchain._btbn_asset().startswith("ffmpeg-master-latest-"), "managed ffmpeg asset selection failed")
@@ -152,6 +154,9 @@ def main():
     check(not initializer.should_prepare_adobe("crafting-first", True), "crafting-first initialization must defer Adobe startup")
     check(initializer.should_prepare_adobe("adobe-only", True), "adobe-only auto initialization must prepare Adobe")
     check(initializer.safe_ae_probe_plan() == {"actions": []}, "AE probe must not mutate or close a project")
+    check("Crafting App CLI first" in initializer.routing_rule("crafting-first"), "crafting-first routing rule mismatch")
+    adobe_rule = initializer.routing_rule("adobe-only")
+    check("only installed Adobe" in adobe_rule and "do not create FilmCraft or EffectCraft" in adobe_rule, "adobe-only routing rule permits Crafting Apps")
     check(
         initializer.initialization_status("adobe-only", True, True, True, False, True, True, True, False, False, False, False) == "BLOCKED",
         "adobe-only policy without Adobe must be blocked",
@@ -409,9 +414,34 @@ def main():
                 raise AssertionError("load_plan accepted a numeric shell argument")
             except SystemExit:
                 pass
+            nested_invalid = [
+                {"engine": "premiere", "op": "ping", "fallbacks": [{"engine": "shell", "argv": ["echo", 1]}]},
+                {"engine": "premiere", "op": "ping", "verify": {"engine": "shell", "argv": ["echo", 1]}},
+            ]
+            for index, action in enumerate(nested_invalid):
+                nested_plan = td / f"nested-invalid-{index}.json"
+                payload = {"actions": [action]}
+                nested_plan.write_text(json.dumps(payload))
+                try:
+                    execute_plan.load_plan(nested_plan, ROOT)
+                    raise AssertionError("load_plan accepted an invalid nested action")
+                except SystemExit:
+                    pass
+                try:
+                    execute_plan.minimal_plan_check(payload)
+                    raise AssertionError("minimal_plan_check accepted an invalid nested action")
+                except SystemExit:
+                    pass
             good = td / "good.json"
             good.write_text(json.dumps({"actions": [{"engine": "shell", "argv": ["echo", "hi"]}]}))
             check(execute_plan.load_plan(good, ROOT)["actions"][0]["engine"] == "shell", "valid plan rejected")
+            nested_good = td / "nested-good.json"
+            nested_good.write_text(json.dumps({"actions": [{
+                "engine": "premiere", "op": "ping",
+                "verify": {"engine": "shell", "argv": ["echo", "verified"]},
+                "fallbacks": [{"engine": "shell", "argv": ["echo", "fallback"]}],
+            }]}))
+            check(execute_plan.load_plan(nested_good, ROOT)["actions"][0]["fallbacks"][0]["engine"] == "shell", "valid nested actions were rejected")
             craft_plan = td / "craft-plan.json"
             craft_plan.write_text(json.dumps({"actions": [{
                 "engine": "filmcraft", "argv": ["inspect", "sequence"],

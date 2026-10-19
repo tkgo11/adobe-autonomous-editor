@@ -3,6 +3,23 @@ param(
 )
 $ErrorActionPreference = "Stop"
 
+function Test-PipVenv {
+  param([Parameter(Mandatory=$true)][string]$Python)
+  $probe = Join-Path ([System.IO.Path]::GetTempPath()) ("aae-python-probe-" + [guid]::NewGuid().ToString("N"))
+  try {
+    & $Python -m venv $probe *> $null
+    $venvCreated = $LASTEXITCODE -eq 0
+    $venvPython = Join-Path $probe "Scripts\python.exe"
+    if(-not $venvCreated -or -not (Test-Path -LiteralPath $venvPython)) { return $false }
+    & $venvPython -m pip --version *> $null
+    return $LASTEXITCODE -eq 0
+  } catch {
+    return $false
+  } finally {
+    if(Test-Path -LiteralPath $probe) { Remove-Item -LiteralPath $probe -Recurse -Force }
+  }
+}
+
 function Resolve-CompatiblePython {
   $commands = @("python", "python3")
   foreach($name in $commands) {
@@ -11,7 +28,10 @@ function Resolve-CompatiblePython {
       if($command.Source -match "\\WindowsApps\\") { continue }
       try {
         $resolved = & $command.Source -c "import sys; assert sys.version_info >= (3,10); print(sys.executable)" 2>$null
-        if($LASTEXITCODE -eq 0 -and $resolved) { return ($resolved | Select-Object -Last 1) }
+        if($LASTEXITCODE -eq 0 -and $resolved) {
+          $candidate = [string]($resolved | Select-Object -Last 1)
+          if(Test-PipVenv -Python $candidate.Trim()) { return $candidate.Trim() }
+        }
       } catch {}
     }
   }
@@ -19,7 +39,10 @@ function Resolve-CompatiblePython {
   if($launcher) {
     try {
       $resolved = & $launcher.Source -3 -c "import sys; assert sys.version_info >= (3,10); print(sys.executable)" 2>$null
-      if($LASTEXITCODE -eq 0 -and $resolved) { return ($resolved | Select-Object -Last 1) }
+      if($LASTEXITCODE -eq 0 -and $resolved) {
+        $candidate = [string]($resolved | Select-Object -Last 1)
+        if(Test-PipVenv -Python $candidate.Trim()) { return $candidate.Trim() }
+      }
     } catch {}
   }
   return $null

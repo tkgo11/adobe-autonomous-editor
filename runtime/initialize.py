@@ -81,6 +81,12 @@ def preferred_editors(editor_priority: str, crafting: dict, tools: dict) -> list
     return editors
 
 
+def routing_rule(editor_priority: str) -> str:
+    if editor_priority == "adobe-only":
+        return "Use only installed Adobe Premiere Pro or After Effects capabilities; do not create FilmCraft or EffectCraft actions."
+    return "Use the matching Crafting App CLI first; use Adobe only when the required feature is unavailable or a verified Crafting Apps attempt fails."
+
+
 def initialization_status(
     editor_priority: str,
     sources_ok: bool,
@@ -339,7 +345,7 @@ def main():
         "routing": {
             "policy": ns.editor_priority,
             "priority_order": ["filmcraft", "effectcraft", "premiere", "after_effects"] if ns.editor_priority == "crafting-first" else ["premiere", "after_effects"],
-            "rule": "Use the matching Crafting App CLI first; use Adobe only when the required feature is unavailable or a verified Crafting Apps attempt fails.",
+            "rule": routing_rule(ns.editor_priority),
         },
         "crafting_apps": {
             "scope": ["filmcraft", "effectcraft"],
