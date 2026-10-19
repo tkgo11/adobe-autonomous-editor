@@ -125,6 +125,10 @@ def main():
     check((ROOT / "scripts/initialize_job.sh").exists(), "Unix initialize wrapper missing")
     windows_provisioner = (ROOT / "scripts/provision_python.ps1").read_text(encoding="utf-8")
     check("function Test-PipVenv" in windows_provisioner and "-m venv" in windows_provisioner and "-m pip --version" in windows_provisioner, "Windows Python compatibility probe does not verify a pip-enabled venv")
+    shell_installer = (ROOT / "install.sh").read_text(encoding="utf-8")
+    ps_installer = (ROOT / "install.ps1").read_text(encoding="utf-8")
+    check("validation_python" in shell_installer and "sys.version_info >= (3,10)" in shell_installer, "Unix installer does not gate validation on Python 3.10+")
+    check("Find-CompatiblePython" in ps_installer and "sys.version_info >= (3,10)" in ps_installer, "Windows installer does not gate validation on Python 3.10+")
     requirements = (ROOT / "runtime/requirements.txt").read_text(encoding="utf-8")
     check("static-ffmpeg" not in requirements, "unverified macOS ffmpeg dependency must not be installed")
     check(toolchain._btbn_asset() is None or toolchain._btbn_asset().startswith("ffmpeg-master-latest-"), "managed ffmpeg asset selection failed")
@@ -139,6 +143,18 @@ def main():
         check(str(Path(sys.executable).parent.resolve()) in os.environ["PATH"].split(os.pathsep), "managed tool PATH was not restored")
     finally:
         os.environ["PATH"] = original_path
+
+    original_which = toolchain.shutil.which
+    original_probe = toolchain._probe
+    try:
+        toolchain.shutil.which = lambda name: f"/invalid/{name}" if name in {"ffmpeg", "ffprobe"} else original_which(name)
+        toolchain._probe = lambda path: {"ok": False, "error": "not executable"}
+        rejected_media = toolchain.probe_system_media_tools()
+    finally:
+        toolchain.shutil.which = original_which
+        toolchain._probe = original_probe
+    check(not rejected_media["ok"] and "ffmpeg" not in rejected_media and "ffprobe" not in rejected_media, "failed media probes exposed rejected system binaries")
+    check(initializer.verified_media_path(rejected_media, "ffmpeg") is None, "failed ffmpeg probe was restored into initialization")
 
     # Only the two video-related Crafting Apps are supported, and release
     # selection must choose the official CLI-containing artifact per platform.
@@ -167,8 +183,6 @@ def main():
         {"premiere": "Premiere", "afterfx": None},
     )
     check(preferred == ["filmcraft", "premiere"], "preferred editors must contain only available applications")
-    shell_installer = (ROOT / "install.sh").read_text(encoding="utf-8")
-    ps_installer = (ROOT / "install.ps1").read_text(encoding="utf-8")
     check("replace_transactionally" in shell_installer and ".stage." in shell_installer, "Unix installer replacement is not staged")
     check("Install-Transactionally" in ps_installer and ".stage." in ps_installer, "Windows installer replacement is not staged")
 
@@ -448,6 +462,10 @@ def main():
                 "fallbacks": [{"engine": "premiere", "op": "getProjectState"}],
             }]}))
             check(execute_plan.load_plan(craft_plan, ROOT)["actions"][0]["engine"] == "filmcraft", "Crafting Apps plan rejected")
+            check(execute_plan.premiere_needs_activation({"ok": False, "error": "[WinError 10061] No connection could be made because the target machine actively refused it"}), "Windows 10061 refusal did not request Premiere activation")
+            check(execute_plan.premiere_needs_activation({"ok": False, "error": "[WinError 1225] The remote computer refused the network connection"}), "Windows 1225 refusal did not request Premiere activation")
+            check(execute_plan.premiere_connection_exception(OSError(10061, "actively refused")), "structured Windows refusal was not recognized")
+            check(not execute_plan.premiere_connection_exception(ValueError("unrelated")), "unrelated exception requested Premiere activation")
             check(execute_plan.validate_editor_policy({"actions": [{"engine": "premiere"}]}, "adobe-only") == "adobe-only", "Adobe-only policy rejected Adobe action")
             for policy_plan in (
                 {"editorPolicy": "crafting-first", "actions": [{"engine": "premiere"}]},
@@ -490,6 +508,21 @@ def main():
                     execute_plan.ws_call = original_ws_call
                     executor.activate_premiere_fallback = original_activate
                 check(recovered.get("ok") and len(calls) == 2, "Premiere disconnected response did not trigger activation and retry")
+
+                calls = []
+                async def fake_windows_refusal(*args, **kwargs):
+                    calls.append(args)
+                    if len(calls) == 1:
+                        raise OSError(10061, "No connection could be made because the target machine actively refused it")
+                    return {"ok": True, "result": {"pong": True}}
+                try:
+                    execute_plan.ws_call = fake_windows_refusal
+                    executor.activate_premiere_fallback = lambda timeout=60: {"ok": True}
+                    recovered = executor.primitive({"engine": "premiere", "op": "ping", "args": {}})
+                finally:
+                    execute_plan.ws_call = original_ws_call
+                    executor.activate_premiere_fallback = original_activate
+                check(recovered.get("ok") and len(calls) == 2, "Windows connection refusal did not trigger activation and retry")
 
             # initialize.py end-to-end: no readable sources -> BLOCKED contract artifacts.
             job = td / "job"

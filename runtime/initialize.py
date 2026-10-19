@@ -27,7 +27,7 @@ from crafting_apps import discover as discover_crafting_app
 from crafting_apps import install_video_clis, probe as probe_crafting_app
 from package_bridge import package as package_bridge
 from platform_support import desktop_probe, find_adobe_tool, find_upia, launch_application, product_version, upia_install_command
-from toolchain import ensure_media_tools
+from toolchain import ensure_media_tools, probe_system_media_tools
 
 
 def ensure_dirs(job):
@@ -85,6 +85,10 @@ def routing_rule(editor_priority: str) -> str:
     if editor_priority == "adobe-only":
         return "Use only installed Adobe Premiere Pro or After Effects capabilities; do not create FilmCraft or EffectCraft actions."
     return "Use the matching Crafting App CLI first; use Adobe only when the required feature is unavailable or a verified Crafting Apps attempt fails."
+
+
+def verified_media_path(media_tools: dict, name: str) -> str | None:
+    return media_tools.get(name) if media_tools.get("ok") else None
 
 
 def initialization_status(
@@ -194,9 +198,7 @@ def main():
     except OSError:
         pass
 
-    media_tools = {"ok": bool(shutil.which("ffmpeg") and shutil.which("ffprobe")), "installed": False, "source": "system"}
-    if ns.install_media_tools:
-        media_tools = ensure_media_tools(global_dir)
+    media_tools = ensure_media_tools(global_dir) if ns.install_media_tools else probe_system_media_tools()
 
     inventory_path = job / "analysis/source_inventory.json"
     inventory_run = {"returncode": 2, "stderr": "no sources supplied"}
@@ -232,8 +234,8 @@ def main():
 
     tools = {
         "python": sys.executable,
-        "ffmpeg": media_tools.get("ffmpeg") or shutil.which("ffmpeg"),
-        "ffprobe": media_tools.get("ffprobe") or shutil.which("ffprobe"),
+        "ffmpeg": verified_media_path(media_tools, "ffmpeg"),
+        "ffprobe": verified_media_path(media_tools, "ffprobe"),
         "powershell": shutil.which("powershell") or shutil.which("pwsh"),
         "premiere": find_adobe_tool("premiere"),
         "afterfx": find_adobe_tool("afterfx"),

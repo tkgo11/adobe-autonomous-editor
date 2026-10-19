@@ -65,11 +65,29 @@ validate_install() {
   }
 }
 
+validation_python() {
+  local candidate resolved
+  for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      if resolved=$("$candidate" -c 'import sys; print(sys.executable) if sys.version_info >= (3,10) else sys.exit(1)' 2>/dev/null); then
+        printf '%s\n' "$resolved"
+        return 0
+      fi
+    fi
+  done
+  return 1
+}
+
 validate_runtime() {
-  local target="$1"
-  if [[ "$SKIP_VALIDATION" -eq 0 ]] && command -v python3 >/dev/null 2>&1; then
+  local target="$1" python
+  if [[ "$SKIP_VALIDATION" -ne 0 ]]; then
+    return 0
+  fi
+  if python=$(validation_python); then
     echo "Running package self-test in staged installation..."
-    python3 "$target/tests/selftest.py"
+    "$python" "$target/tests/selftest.py"
+  else
+    echo "Python 3.10+ was not found; runtime validation is deferred to the skill's self-provisioned job environment." >&2
   fi
 }
 
@@ -130,11 +148,7 @@ else
 fi
 
 validate_install "$DEST"
-
-if [[ "$SKIP_VALIDATION" -eq 0 ]] && command -v python3 >/dev/null 2>&1; then
-  echo "Running package self-test..."
-  python3 "$DEST/tests/selftest.py"
-fi
+validate_runtime "$DEST"
 
 cat <<EOF
 

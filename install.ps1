@@ -23,13 +23,34 @@ function Test-SkillPackage([string]$Target) {
   }
 }
 
+function Find-CompatiblePython {
+  foreach($name in @("python", "python3")) {
+    $command = Get-Command $name -ErrorAction SilentlyContinue
+    if(-not $command -or $command.Source -match "\\WindowsApps\\") { continue }
+    try {
+      $resolved = & $command.Source -c "import sys; print(sys.executable) if sys.version_info >= (3,10) else sys.exit(1)" 2>$null
+      if($LASTEXITCODE -eq 0 -and $resolved) { return ([string]($resolved | Select-Object -Last 1)).Trim() }
+    } catch {}
+  }
+  $launcher = Get-Command py -ErrorAction SilentlyContinue
+  if($launcher) {
+    try {
+      $resolved = & $launcher.Source -3 -c "import sys; print(sys.executable) if sys.version_info >= (3,10) else sys.exit(1)" 2>$null
+      if($LASTEXITCODE -eq 0 -and $resolved) { return ([string]($resolved | Select-Object -Last 1)).Trim() }
+    } catch {}
+  }
+  return $null
+}
+
 function Test-SkillRuntime([string]$Target) {
   if (-not $SkipValidation) {
-    $python = Get-Command python -ErrorAction SilentlyContinue
+    $python = Find-CompatiblePython
     if ($python) {
       Write-Host "Running package self-test in staged installation..."
-      & $python.Source (Join-Path $Target "tests\selftest.py")
+      & $python (Join-Path $Target "tests\selftest.py")
       if ($LASTEXITCODE -ne 0) { throw "Skill self-test failed." }
+    } else {
+      Write-Warning "Python 3.10+ was not found; runtime validation is deferred to the skill's self-provisioned job environment."
     }
   }
 }
@@ -106,17 +127,7 @@ if (Test-Path -LiteralPath $destination) {
 }
 
 Test-SkillPackage $destination
-
-if (-not $SkipValidation) {
-  $python = Get-Command python -ErrorAction SilentlyContinue
-  if ($python) {
-    Write-Host "Running package self-test..."
-    & $python.Source (Join-Path $destination "tests\selftest.py")
-    if ($LASTEXITCODE -ne 0) { throw "Skill self-test failed." }
-  } else {
-    Write-Warning "Python was not found, so the optional package self-test was skipped."
-  }
-}
+Test-SkillRuntime $destination
 
 Write-Host ""
 Write-Host "Installed successfully: $destination" -ForegroundColor Green

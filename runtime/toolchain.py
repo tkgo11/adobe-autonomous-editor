@@ -233,6 +233,22 @@ def _install_macos(root: Path) -> tuple[str, str, dict]:
     return _install_static(root, "Darwin")
 
 
+def probe_system_media_tools() -> dict:
+    """Return system media paths only after both executables pass probes."""
+    paths = {"ffmpeg": shutil.which("ffmpeg"), "ffprobe": shutil.which("ffprobe")}
+    result = {"ok": False, "installed": False, "source": "system", "probes": {}}
+    if not all(paths.values()):
+        result["error"] = "ffmpeg and ffprobe were not both found on PATH"
+        return result
+    probes = {name: _probe(path) for name, path in paths.items()}
+    result["probes"] = probes
+    if not all(item.get("ok") for item in probes.values()):
+        result["error"] = f"system media tools failed version probes: {probes}"
+        return result
+    result.update({"ok": True, **paths})
+    return result
+
+
 def ensure_media_tools(state_dir: Path) -> dict:
     """Return verified ffmpeg/ffprobe paths, installing a local copy if needed.
 
@@ -242,16 +258,9 @@ def ensure_media_tools(state_dir: Path) -> dict:
     executables must pass a real version probe before use.
     """
     state_dir = Path(state_dir)
-    system_ffmpeg = shutil.which("ffmpeg")
-    system_ffprobe = shutil.which("ffprobe")
-    if system_ffmpeg and system_ffprobe:
-        probes = {"ffmpeg": _probe(system_ffmpeg), "ffprobe": _probe(system_ffprobe)}
-        if all(item["ok"] for item in probes.values()):
-            return {
-                "ok": True, "installed": False, "source": "system",
-                "ffmpeg": system_ffmpeg, "ffprobe": system_ffprobe,
-                "probes": probes,
-            }
+    system_tools = probe_system_media_tools()
+    if system_tools["ok"]:
+        return system_tools
 
     root = state_dir / "toolchain/ffmpeg"
     manifest_path = root / "manifest.json"

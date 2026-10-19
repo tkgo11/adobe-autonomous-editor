@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import errno
 import importlib.util
 import json
 import subprocess
@@ -104,10 +105,30 @@ def premiere_needs_activation(result: dict) -> bool:
     if result.get("ok"):
         return False
     error = str(result.get("error") or "").lower()
+    if result.get("activationRequired"):
+        return True
     return any(marker in error for marker in (
         "premiere bridge is not connected", "broker unavailable",
         "connection refused", "connect call failed", "timed out",
+        "actively refused", "remote computer refused",
+        "winerror 10061", "winerror 1225",
     ))
+
+
+def premiere_connection_exception(exc: BaseException) -> bool:
+    """Recognize refusal errors without depending on platform-specific wording."""
+    current = exc
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ConnectionRefusedError):
+            return True
+        if getattr(current, "errno", None) in {errno.ECONNREFUSED, 10061, 1225}:
+            return True
+        if getattr(current, "winerror", None) in {10061, 1225}:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _read_json(path: Path) -> dict:
@@ -277,7 +298,11 @@ class Executor:
             try:
                 first = asyncio.run(ws_call(self.control_uri, self.secret, a.get("op"), a.get("args", {}), timeout))
             except Exception as exc:
-                first = {"ok": False, "error": str(exc)}
+                first = {
+                    "ok": False, "error": str(exc),
+                    "exceptionType": type(exc).__name__,
+                    "activationRequired": premiere_connection_exception(exc),
+                }
             if first.get("ok"):
                 return first
             if not premiere_needs_activation(first):
