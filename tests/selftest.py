@@ -123,6 +123,8 @@ def main():
     check((ROOT / "scripts/provision_python.ps1").exists(), "Windows Python self-provisioner missing")
     check((ROOT / "scripts/provision_python.sh").exists(), "Unix Python self-provisioner missing")
     check((ROOT / "scripts/initialize_job.sh").exists(), "Unix initialize wrapper missing")
+    windows_initializer = (ROOT / "scripts/initialize_job.ps1").read_text(encoding="utf-8")
+    check('if(-not $NoAuto){$initArgs += "--auto"}' in windows_initializer and "$explicit" not in windows_initializer, "PowerShell Crafting switches suppress automatic media provisioning")
     windows_provisioner = (ROOT / "scripts/provision_python.ps1").read_text(encoding="utf-8")
     check("function Test-PipVenv" in windows_provisioner and "-m venv" in windows_provisioner and "-m pip --version" in windows_provisioner, "Windows Python compatibility probe does not verify a pip-enabled venv")
     shell_installer = (ROOT / "install.sh").read_text(encoding="utf-8")
@@ -131,6 +133,8 @@ def main():
     check("Find-CompatiblePython" in ps_installer and "sys.version_info >= (3,10)" in ps_installer, "Windows installer does not gate validation on Python 3.10+")
     requirements = (ROOT / "runtime/requirements.txt").read_text(encoding="utf-8")
     check("static-ffmpeg" not in requirements, "unverified macOS ffmpeg dependency must not be installed")
+    unix_provisioner = (ROOT / "scripts/provision_python.sh").read_text(encoding="utf-8")
+    check(".stage.XXXXXX" in unix_provisioner and 'rm -rf -- "$EXTRACTED"' in unix_provisioner and 'mv "$STAGED" "$EXTRACTED"' in unix_provisioner, "Unix uv extraction is not transactionally recoverable")
     check(toolchain._btbn_asset() is None or toolchain._btbn_asset().startswith("ffmpeg-master-latest-"), "managed ffmpeg asset selection failed")
     check(toolchain._btbn_asset(system="Linux", machine="x86_64", libc="musl") is None, "musl Linux must not select a glibc BtbN build")
     check(toolchain._static_asset_names("Linux", "x86_64") == ("ffmpeg-linux-x64", "ffprobe-linux-x64"), "musl Linux static ffmpeg assets mismatch")
@@ -143,6 +147,25 @@ def main():
         check(str(Path(sys.executable).parent.resolve()) in os.environ["PATH"].split(os.pathsep), "managed tool PATH was not restored")
     finally:
         os.environ["PATH"] = original_path
+
+    with tempfile.TemporaryDirectory() as managed_temp:
+        managed_job = Path(managed_temp) / "managed-media-job"
+        managed_bin = managed_job / "managed-bin"
+        managed_bin.mkdir(parents=True)
+        for name in ("ffmpeg", "ffprobe"):
+            executable = managed_bin / name
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o755)
+        (managed_job / "analysis").mkdir()
+        managed_environment = managed_job / "analysis/environment.json"
+        managed_environment.write_text(json.dumps({"tools": {"ffmpeg": str(managed_bin / "ffmpeg"), "ffprobe": str(managed_bin / "ffprobe")}}))
+        try:
+            os.environ["PATH"] = original_path
+            restored = toolchain.restore_job_media_path(None, (managed_job / "analysis/result.json",))
+            check(restored == str(managed_environment.resolve()), "standalone command did not discover its job environment")
+            check(str(managed_bin.resolve()) in os.environ["PATH"].split(os.pathsep), "standalone command did not restore managed media tools")
+        finally:
+            os.environ["PATH"] = original_path
 
     original_which = toolchain.shutil.which
     original_probe = toolchain._probe
@@ -275,6 +298,19 @@ def main():
         check("findElement" in scripts[1] and "AXButton" in scripts[1] and 'whose name is "Project"' in scripts[1], "macOS accessibility action generation failed")
         check('perform action "AXRaise"' in scripts[2] and 'whose name is "Project"' in scripts[2], "macOS focus did not raise the matched window")
         check("entire contents" not in scripts[3] and "walkElement" in scripts[3] and "rowLimit : 3" in scripts[3], "macOS accessibility traversal is not bounded during recursion")
+
+        regex_scripts = []
+        original_dump = desktop_driver._mac_dump_tree
+        try:
+            desktop_driver._osascript = lambda source: regex_scripts.append(source) or ""
+            desktop_driver._mac_dump_tree = lambda window, limit=1500: [
+                {"role": "AXButton", "name": "Export Media", "description": ""},
+            ]
+            desktop_driver._mac_click_control(mac_window, {"title_re": r"Export.*", "control_type": "button"})
+        finally:
+            desktop_driver._osascript = original_osascript
+            desktop_driver._mac_dump_tree = original_dump
+        check(regex_scripts and 'targetWindow, "Export Media", "AXButton"' in regex_scripts[0], "macOS title_re selector was not resolved to an accessibility control")
 
         screenshot_commands = []
         original_find = desktop_driver._mac_find_window
@@ -512,6 +548,60 @@ def main():
                 executor.env = {"tools": {}}
                 unavailable = executor.activate_premiere_fallback()
                 check(not unavailable["ok"] and "not installed" in unavailable["error"], "missing Premiere fallback was not reported cleanly")
+
+                executor.job = td
+                executor.skill = ROOT
+                original_ensure = execute_plan.ensure_transcription_runtime
+                original_run = execute_plan.subprocess.run
+                captured_command = []
+                try:
+                    def reject_ml_install(skill):
+                        raise AssertionError("whisper-cli must not provision faster-whisper")
+                    def fake_transcribe(command, **kwargs):
+                        captured_command.extend(command)
+                        return subprocess.CompletedProcess(command, 0, "ok", "")
+                    execute_plan.ensure_transcription_runtime = reject_ml_install
+                    execute_plan.subprocess.run = fake_transcribe
+                    transcript = executor.primitive({"engine": "transcribe", "media": "audio.wav", "backend": "whisper-cli"})
+                finally:
+                    execute_plan.ensure_transcription_runtime = original_ensure
+                    execute_plan.subprocess.run = original_run
+                check(transcript["ok"] and transcript["dependency"].get("skipped"), "whisper-cli action required the faster-whisper runtime")
+                check("--backend" in captured_command and "whisper-cli" in captured_command, "whisper-cli backend was not forwarded")
+
+                repair_executor = execute_plan.Executor.__new__(execute_plan.Executor)
+                repair_executor.env = {"tools": {"premiere": "Premiere", "upia": "UPIA"}}
+                repair_executor.capabilities = {"premiere": {"uxp_install": {"ok": True, "package_sha256": "abc"}}}
+                repair_executor.job = td
+                repair_executor.skill = ROOT
+                repair_executor.control_uri = "ws://127.0.0.1:8766"
+                repair_executor.secret = "secret"
+                repair_executor.bridge_marker = None
+                repaired = []
+                repair_executor.install_premiere_bridge = lambda upia, ccx, package_hash, timeout, op="install_bridge": repaired.append(op) or {"op": op, "ok": True}
+                original_start = execute_plan.start_broker
+                original_launch = execute_plan.launch_application
+                original_ws_call = execute_plan.ws_call
+                original_time = execute_plan.time.time
+                original_sleep = execute_plan.time.sleep
+                clock = [0.0]
+                async def disconnected(*args, **kwargs):
+                    return {"ok": False, "error": "not connected"}
+                try:
+                    execute_plan.start_broker = lambda *args, **kwargs: type("Process", (), {"pid": 1})()
+                    execute_plan.launch_application = lambda path: None
+                    execute_plan.ws_call = disconnected
+                    execute_plan.time.time = lambda: clock[0]
+                    execute_plan.time.sleep = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+                    repair_result = repair_executor.activate_premiere_fallback(timeout=3)
+                finally:
+                    execute_plan.start_broker = original_start
+                    execute_plan.launch_application = original_launch
+                    execute_plan.ws_call = original_ws_call
+                    execute_plan.time.time = original_time
+                    execute_plan.time.sleep = original_sleep
+                check("repair_bridge" in repaired, "stale Premiere bridge marker did not trigger a repair install after connection failure")
+                check(any(step.get("op") == "relaunch_premiere_after_repair" for step in repair_result["steps"]), "Premiere was not relaunched after bridge repair")
 
                 # A normal broker response with ok:false must activate Premiere;
                 # recovery is not limited to socket exceptions.

@@ -216,6 +216,29 @@ class Executor:
         temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         temporary.replace(self.bridge_marker)
 
+    def install_premiere_bridge(self, upia: str | None, ccx: Path, package_hash: str | None, timeout: float, op: str = "install_bridge") -> dict:
+        if not upia or not ccx.exists():
+            missing = "Adobe UPIA not found" if not upia else f"bridge package not found: {ccx}"
+            return {"op": op, "ok": False, "error": missing}
+        try:
+            install = subprocess.run(
+                upia_install_command(upia, ccx), text=True, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, timeout=min(120, max(20, timeout)),
+            )
+            step = {
+                "op": op, "ok": install.returncode == 0,
+                "returncode": install.returncode, "stdout": install.stdout[-4000:],
+                "stderr": install.stderr[-4000:],
+            }
+            if install.returncode == 0 and package_hash:
+                try:
+                    self.persist_bridge_marker(package_hash, ccx)
+                except Exception as exc:
+                    step["marker_error"] = str(exc)
+            return step
+        except Exception as exc:
+            return {"op": op, "ok": False, "error": str(exc)}
+
     def activate_premiere_fallback(self, timeout: float = 60) -> dict:
         """Prepare Premiere only when a selected fallback actually needs it."""
         recovery = {"ok": False, "attempted": True, "steps": []}
@@ -232,28 +255,8 @@ class Executor:
         bridge_ready = bool(install_capability.get("ok")) or self.bridge_marker_matches(package_hash)
         if bridge_ready:
             recovery["steps"].append({"op": "install_bridge", "ok": True, "reused": True})
-        elif upia and ccx.exists():
-            try:
-                install = subprocess.run(
-                    upia_install_command(upia, ccx), text=True, stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE, timeout=min(120, max(20, timeout)),
-                )
-                install_step = {
-                    "op": "install_bridge", "ok": install.returncode == 0,
-                    "returncode": install.returncode, "stdout": install.stdout[-4000:],
-                    "stderr": install.stderr[-4000:],
-                }
-                recovery["steps"].append(install_step)
-                if install.returncode == 0 and package_hash:
-                    try:
-                        self.persist_bridge_marker(package_hash, ccx)
-                    except Exception as exc:
-                        install_step["marker_error"] = str(exc)
-            except Exception as exc:
-                recovery["steps"].append({"op": "install_bridge", "ok": False, "error": str(exc)})
         else:
-            missing = "Adobe UPIA not found" if not upia else f"bridge package not found: {ccx}"
-            recovery["steps"].append({"op": "install_bridge", "ok": False, "error": missing})
+            recovery["steps"].append(self.install_premiere_bridge(upia, ccx, package_hash, timeout))
 
         try:
             process = start_broker(self.skill, self.job, control_uri=self.control_uri)
@@ -269,6 +272,8 @@ class Executor:
             return recovery
 
         deadline = time.time() + max(5, timeout)
+        repair_at = time.time() + min(10, max(1, timeout / 3)) if bridge_ready else None
+        repair_attempted = False
         last_error = None
         while time.time() < deadline:
             try:
@@ -279,7 +284,19 @@ class Executor:
                 last_error = ping.get("error")
             except Exception as exc:
                 last_error = str(exc)
-            time.sleep(1)
+            if repair_at is not None and not repair_attempted and time.time() >= repair_at:
+                repair_attempted = True
+                repair = self.install_premiere_bridge(upia, ccx, package_hash, timeout, "repair_bridge")
+                recovery["steps"].append(repair)
+                if repair.get("ok"):
+                    try:
+                        launch_application(premiere)
+                        recovery["steps"].append({"op": "relaunch_premiere_after_repair", "ok": True})
+                    except Exception as exc:
+                        recovery["steps"].append({"op": "relaunch_premiere_after_repair", "ok": False, "error": str(exc)})
+                else:
+                    last_error = repair.get("error") or repair.get("stderr") or last_error
+            time.sleep(min(1, max(0, deadline - time.time())))
         recovery["error"] = last_error or "Premiere bridge did not connect before timeout"
         return recovery
 
@@ -345,7 +362,7 @@ class Executor:
 
         if engine == "analysis":
             out = Path(a.get("out", self.job / "analysis" / (Path(a["media"]).stem + ".analysis.json")))
-            cmd = [sys.executable, str(self.skill / "runtime/analyze_media.py"), a["media"], "--out", str(out)]
+            cmd = [sys.executable, str(self.skill / "runtime/analyze_media.py"), a["media"], "--out", str(out), "--environment", str(self.job / "analysis/environment.json")]
             if a.get("sceneThreshold") is not None:
                 cmd += ["--scene-threshold", str(a["sceneThreshold"])]
             if a.get("minSilence") is not None:
@@ -354,7 +371,12 @@ class Executor:
             return {"ok": p.returncode == 0, "returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr, "analysis": str(out)}
 
         if engine == "transcribe":
-            dependency = ensure_transcription_runtime(self.skill)
+            backend = str(a.get("backend", "auto"))
+            dependency = (
+                ensure_transcription_runtime(self.skill)
+                if backend in {"auto", "faster-whisper"}
+                else {"ok": True, "installed": False, "skipped": True, "reason": f"{backend} does not use faster-whisper"}
+            )
             if not dependency.get("ok"):
                 return {"ok": False, "error": "could not provision local transcription runtime", "dependency": dependency}
             out_dir = Path(a.get("outDir", self.job / "analysis" / (Path(a["media"]).stem + "-transcript")))
@@ -367,7 +389,7 @@ class Executor:
 
         if engine == "qc":
             out = Path(a.get("out", self.job / "qc" / (Path(a["media"]).name + ".json")))
-            cmd = [sys.executable, str(self.skill / "scripts/qc.py"), a["media"], "--out", str(out)]
+            cmd = [sys.executable, str(self.skill / "scripts/qc.py"), a["media"], "--out", str(out), "--environment", str(self.job / "analysis/environment.json")]
             if a.get("spec"):
                 cmd += ["--spec", str(a["spec"])]
             if a.get("strict"):
@@ -378,7 +400,7 @@ class Executor:
         if engine == "review":
             out_dir = Path(a.get("outDir", self.job / "qc" / (Path(a["media"]).stem + "-review")))
             p = subprocess.run(
-                [sys.executable, str(self.skill / "runtime/review_packet.py"), a["media"], "--out-dir", str(out_dir), "--frames", str(int(a.get("frames", 12)))],
+                [sys.executable, str(self.skill / "runtime/review_packet.py"), a["media"], "--out-dir", str(out_dir), "--frames", str(int(a.get("frames", 12))), "--environment", str(self.job / "analysis/environment.json")],
                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=float(a.get("timeout", 600)),
             )
             return {"ok": p.returncode == 0, "returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr, "packet": str(out_dir / "review-packet.json")}

@@ -90,7 +90,7 @@ esac
 
 FINAL_URL=$(latest_url)
 TAG=${FINAL_URL##*/}
-[[ -n "$TAG" && "$TAG" != "latest" ]] || { echo "Could not resolve the latest uv release." >&2; exit 1; }
+[[ "$TAG" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ && "$TAG" != "latest" ]] || { echo "Could not resolve a safe latest uv release tag." >&2; exit 1; }
 ASSET="uv-${CPU_TARGET}-${OS_TARGET}.tar.gz"
 BASE="https://github.com/astral-sh/uv/releases/download/${TAG}"
 DOWNLOADS="$UV_ROOT/downloads/$TAG"
@@ -118,11 +118,20 @@ if tar -tzf "$ARCHIVE" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
   exit 1
 fi
 EXTRACTED="$UV_ROOT/releases/$TAG"
-if [[ ! -d "$EXTRACTED" ]]; then
-  mkdir -p "$EXTRACTED"
-  tar -xzf "$ARCHIVE" -C "$EXTRACTED"
+mkdir -p "$UV_ROOT/releases"
+UV=$(find "$EXTRACTED" -type f -name uv -perm -u+x -print -quit 2>/dev/null || true)
+if [[ ! -x "$UV" ]]; then
+  STAGED=$(mktemp -d "$UV_ROOT/releases/.${TAG}.stage.XXXXXX")
+  cleanup_stage() { rm -rf -- "$STAGED"; }
+  trap cleanup_stage EXIT
+  tar -xzf "$ARCHIVE" -C "$STAGED"
+  STAGED_UV=$(find "$STAGED" -type f -name uv -perm -u+x -print -quit)
+  [[ -x "$STAGED_UV" ]] || { echo "Verified uv archive did not contain an executable." >&2; exit 1; }
+  rm -rf -- "$EXTRACTED"
+  mv "$STAGED" "$EXTRACTED"
+  trap - EXIT
+  UV=$(find "$EXTRACTED" -type f -name uv -perm -u+x -print -quit)
 fi
-UV=$(find "$EXTRACTED" -type f -name uv -perm -u+x | head -n 1)
 [[ -x "$UV" ]] || { echo "Verified uv archive did not contain an executable." >&2; exit 1; }
 
 mkdir -p "$PYTHON_ROOT"

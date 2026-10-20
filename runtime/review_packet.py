@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse, json, math, shutil, subprocess
 from pathlib import Path
 
+from toolchain import restore_job_media_path
+
 def run(cmd):
     p=subprocess.run(cmd,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE);return p.returncode,p.stdout,p.stderr
 
@@ -15,7 +17,8 @@ def duration(ffprobe,media):
         return 0.0
 
 def main():
-    ap=argparse.ArgumentParser();ap.add_argument("media");ap.add_argument("--out-dir",required=True);ap.add_argument("--frames",type=int,default=12);ns=ap.parse_args()
+    ap=argparse.ArgumentParser();ap.add_argument("media");ap.add_argument("--out-dir",required=True);ap.add_argument("--frames",type=int,default=12);ap.add_argument("--environment",help="job analysis/environment.json (normally auto-discovered)");ns=ap.parse_args()
+    restore_job_media_path(ns.environment,(ns.out_dir,ns.media))
     ffmpeg=shutil.which("ffmpeg");ffprobe=shutil.which("ffprobe")
     if not ffmpeg or not ffprobe:raise SystemExit("ffmpeg/ffprobe required")
     media=Path(ns.media).resolve();out=Path(ns.out_dir).resolve();out.mkdir(parents=True,exist_ok=True);d=duration(ffprobe,media);shots=[]

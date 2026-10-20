@@ -108,15 +108,29 @@ end tell
 def _mac_click_control(window, step, set_text=None):
     process = _as_string(window["process"])
     window_title = _as_string(window["title"])
-    title = _as_string(step.get("title") or step.get("name") or "")
-    if not title:
-        raise RuntimeError("macOS accessibility action requires title")
     role = str(step.get("control_type") or "button").lower()
     ax_role = {
         "button": "AXButton", "axbutton": "AXButton", "menuitem": "AXMenuItem",
         "axmenuitem": "AXMenuItem", "edit": "AXTextField", "textfield": "AXTextField",
         "axtextfield": "AXTextField", "checkbox": "AXCheckBox", "axcheckbox": "AXCheckBox",
     }.get(role, "")
+    title_value = step.get("title") or step.get("name")
+    if not title_value and step.get("title_re"):
+        try:
+            pattern = re.compile(str(step["title_re"]))
+        except re.error as exc:
+            raise RuntimeError(f"Invalid macOS accessibility title_re: {exc}") from exc
+        matches = [
+            row["name"] for row in _mac_dump_tree(window, int(step.get("maxChildren", 1500)))
+            if row.get("name") and pattern.search(row["name"])
+            and (not ax_role or row.get("role") == ax_role)
+        ]
+        if not matches:
+            raise RuntimeError(f"Accessibility element not found for title_re: {step['title_re']}")
+        title_value = matches[0]
+    title = _as_string(title_value or "")
+    if not title:
+        raise RuntimeError("macOS accessibility action requires title, name, or title_re")
     action = (
         f'set value of hit to "{_as_string(set_text)}"'
         if set_text is not None else

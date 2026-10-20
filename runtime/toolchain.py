@@ -324,3 +324,42 @@ def restore_media_path(environment: dict) -> None:
         value = tools.get(key)
         if value and Path(value).exists():
             _prepend(Path(value).parent)
+
+
+def restore_job_media_path(environment_path=None, anchors=()) -> str | None:
+    """Restore managed media tools for a standalone job command.
+
+    Initializers cannot mutate the parent shell's environment.  Standalone
+    analysis/QC commands therefore locate the job's recorded environment from
+    an explicit path, AAE_ENVIRONMENT/AAE_JOB_ROOT, or a nearby input/output
+    path before resolving ffmpeg and ffprobe.
+    """
+    candidates = []
+    if environment_path:
+        candidates.append(Path(environment_path).expanduser())
+    if os.environ.get("AAE_ENVIRONMENT"):
+        candidates.append(Path(os.environ["AAE_ENVIRONMENT"]).expanduser())
+    if os.environ.get("AAE_JOB_ROOT"):
+        candidates.append(Path(os.environ["AAE_JOB_ROOT"]).expanduser() / "analysis/environment.json")
+
+    search_roots = [Path.cwd(), *(Path(anchor).expanduser() for anchor in anchors if anchor)]
+    for root in search_roots:
+        root = root.resolve(strict=False)
+        directory = root if root.is_dir() else root.parent
+        for parent in (directory, *directory.parents):
+            candidates.extend((parent / "environment.json", parent / "analysis/environment.json"))
+
+    seen = set()
+    for candidate in candidates:
+        resolved = candidate.resolve(strict=False)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            environment = json.loads(resolved.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        if isinstance(environment, dict):
+            restore_media_path(environment)
+            return str(resolved)
+    return None
