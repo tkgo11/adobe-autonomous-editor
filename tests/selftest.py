@@ -428,6 +428,27 @@ def main():
                 raise AssertionError("load_plan accepted a numeric shell argument")
             except SystemExit:
                 pass
+            invalid_crafting = [
+                {"engine": "filmcraft"},
+                {"engine": "filmcraft", "argv": []},
+                {"engine": "effectcraft"},
+                {"engine": "effectcraft", "argv": []},
+                {"engine": "premiere", "op": "ping", "fallbacks": [{"engine": "filmcraft", "argv": []}]},
+            ]
+            for index, action in enumerate(invalid_crafting):
+                crafting_plan = td / f"invalid-crafting-{index}.json"
+                payload = {"actions": [action]}
+                crafting_plan.write_text(json.dumps(payload))
+                try:
+                    execute_plan.load_plan(crafting_plan, ROOT)
+                    raise AssertionError("load_plan accepted a Crafting App action without arguments")
+                except SystemExit:
+                    pass
+                try:
+                    execute_plan.minimal_plan_check(payload)
+                    raise AssertionError("minimal_plan_check accepted a Crafting App action without arguments")
+                except SystemExit:
+                    pass
             nested_invalid = [
                 {"engine": "premiere", "op": "ping", "fallbacks": [{"engine": "shell", "argv": ["echo", 1]}]},
                 {"engine": "premiere", "op": "ping", "verify": {"engine": "shell", "argv": ["echo", 1]}},
@@ -486,6 +507,8 @@ def main():
                 executor.env = {"tools": {"filmcraft_cli": str(fake_cli)}}
                 result = executor.primitive({"engine": "filmcraft", "argv": ["inspect", "sequence"]})
                 check(result["ok"] and result["json"]["args"] == ["inspect", "sequence"], "FilmCraft execution-plan engine failed")
+                empty_crafting = executor.primitive({"engine": "filmcraft", "argv": []})
+                check(not empty_crafting["ok"] and "non-empty" in empty_crafting["error"], "empty FilmCraft action was executed")
                 executor.env = {"tools": {}}
                 unavailable = executor.activate_premiere_fallback()
                 check(not unavailable["ok"] and "not installed" in unavailable["error"], "missing Premiere fallback was not reported cleanly")

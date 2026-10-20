@@ -55,10 +55,17 @@ def minimal_plan_check(plan):
     def check_action(action, location):
         if not isinstance(action, dict) or "engine" not in action:
             raise SystemExit(f"Invalid plan: {location} must be an object with an 'engine' field")
-        if action.get("engine") == "shell":
+        engine = action.get("engine")
+        if engine == "shell":
             argv = action.get("argv")
             if not isinstance(argv, list) or not argv or not all(isinstance(value, str) for value in argv):
                 raise SystemExit(f"Invalid plan: shell {location} requires a non-empty string-only argv array")
+        if engine in {"filmcraft", "effectcraft"}:
+            argv = action.get("argv")
+            if not isinstance(argv, list) or not argv or not all(
+                isinstance(value, (str, int, float)) and not isinstance(value, bool) for value in argv
+            ):
+                raise SystemExit(f"Invalid plan: {engine} {location} requires a non-empty argv array")
         verify = action.get("verify")
         checks = verify if isinstance(verify, list) else [verify] if verify is not None else []
         for index, check in enumerate(checks):
@@ -284,8 +291,10 @@ class Executor:
             if not executable:
                 return {"ok": False, "error": f"{engine}-cli executable unavailable"}
             argv = a.get("argv")
-            if not isinstance(argv, list) or not all(isinstance(x, (str, int, float)) for x in argv):
-                return {"ok": False, "error": f"{engine} action requires an argv array"}
+            if not isinstance(argv, list) or not argv or not all(
+                isinstance(x, (str, int, float)) and not isinstance(x, bool) for x in argv
+            ):
+                return {"ok": False, "error": f"{engine} action requires a non-empty argv array"}
             return run_crafting_cli(
                 executable,
                 [str(x) for x in argv],
