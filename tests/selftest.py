@@ -269,6 +269,12 @@ def main():
         partial_venv = partial_job / "runtime/venv"
         subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(partial_venv)], check=True)
         check(not bootstrap._venv_ready(bootstrap._venv_python(partial_venv)), "pip-free partial venv was accepted")
+        isolated_python = bootstrap._venv_python(partial_venv)
+        isolated_cfg = partial_venv / "pyvenv.cfg"
+        isolated_text = isolated_cfg.read_text(encoding="utf-8")
+        isolated_cfg.write_text(isolated_text.replace("include-system-site-packages = false", "include-system-site-packages = true"), encoding="utf-8")
+        check(not bootstrap._venv_ready(isolated_python), "venv exposing system site-packages was accepted")
+        isolated_cfg.write_text(isolated_text, encoding="utf-8")
         repaired_python, repaired_state = bootstrap.prepare_runtime(partial_job, partial_skill)
         check(bootstrap._venv_ready(repaired_python), "bootstrap did not repair an interrupted venv")
         check(repaired_state["python"] == str(repaired_python), "bootstrap recorded the base interpreter instead of the job venv")
@@ -289,6 +295,14 @@ def main():
             with contextlib.redirect_stdout(io.StringIO()):
                 transcribe.main()
             check(provisioned == [ROOT] and (td / "auto-transcript/transcript.json").exists(), "standalone auto transcription skipped dependency provisioning")
+            transcribe.ensure_transcription_runtime = lambda skill: {"ok": False, "error": "offline"}
+            transcribe.faster_whisper = lambda *args: (_ for _ in ()).throw(AssertionError("faster-whisper ran after failed provisioning"))
+            transcribe.whisper_cli = lambda *args: {"backend": "whisper-cli", "language": "en", "segments": [{"start": 0, "end": 1, "text": "fallback"}]}
+            sys.argv = ["transcribe.py", str(media), "--out-dir", str(td / "auto-fallback")]
+            with contextlib.redirect_stdout(io.StringIO()):
+                transcribe.main()
+            fallback_json = json.loads((td / "auto-fallback/transcript.json").read_text(encoding="utf-8"))
+            check(fallback_json["backend"] == "whisper-cli", "auto transcription did not fall back when faster-whisper provisioning failed")
             transcribe.ensure_transcription_runtime = lambda skill: (_ for _ in ()).throw(AssertionError("whisper-cli attempted ML provisioning"))
             transcribe.whisper_cli = lambda *args: {"backend": "whisper-cli", "language": "en", "segments": [{"start": 0, "end": 1, "text": "hello"}]}
             sys.argv = ["transcribe.py", str(media), "--out-dir", str(td / "cli-transcript"), "--backend", "whisper-cli"]
@@ -400,6 +414,18 @@ def main():
                 path.chmod(0o755)
             (craft_root / "install.json").write_text(json.dumps({"path": str(new_cli.resolve())}))
             check(crafting_apps.discover("filmcraft", td / "managed") == str(new_cli.resolve()), "Crafting Apps manifest release was not preferred")
+            broken_root = td / "broken-managed/crafting-apps/filmcraft"
+            broken_cli = broken_root / "releases/1.0/bin/filmcraft-cli"
+            broken_cli.parent.mkdir(parents=True, exist_ok=True)
+            broken_cli.write_text("#!/bin/sh\nexit 9\n")
+            broken_cli.chmod(0o755)
+            (broken_root / "install.json").write_text(json.dumps({"path": str(broken_cli.resolve())}))
+            original_which = crafting_apps.shutil.which
+            try:
+                crafting_apps.shutil.which = lambda name: str(fake_cli) if name == "filmcraft-cli" else original_which(name)
+                check(crafting_apps.discover("filmcraft", td / "broken-managed") == str(fake_cli.resolve()), "broken managed CLI prevented fallback to working PATH CLI")
+            finally:
+                crafting_apps.shutil.which = original_which
         else:
             skip("Crafting Apps fake CLI", "selftest fixture is POSIX-only")
         r = subprocess.run(
@@ -606,11 +632,14 @@ def main():
                     execute_plan.ensure_transcription_runtime = reject_ml_install
                     execute_plan.subprocess.run = fake_transcribe
                     transcript = executor.primitive({"engine": "transcribe", "media": "audio.wav", "backend": "whisper-cli"})
+                    execute_plan.ensure_transcription_runtime = lambda skill: {"ok": False, "error": "offline"}
+                    auto_transcript = executor.primitive({"engine": "transcribe", "media": "audio.wav", "backend": "auto"})
                 finally:
                     execute_plan.ensure_transcription_runtime = original_ensure
                     execute_plan.subprocess.run = original_run
                 check(transcript["ok"] and transcript["dependency"].get("skipped"), "whisper-cli action required the faster-whisper runtime")
                 check("--backend" in captured_command and "whisper-cli" in captured_command, "whisper-cli backend was not forwarded")
+                check(auto_transcript["ok"] and not auto_transcript["dependency"].get("ok"), "execution plan blocked auto transcription after provisioning failure")
 
                 repair_executor = execute_plan.Executor.__new__(execute_plan.Executor)
                 repair_executor.env = {"tools": {"premiere": "Premiere", "upia": "UPIA"}}

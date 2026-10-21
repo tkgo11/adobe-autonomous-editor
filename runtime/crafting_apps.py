@@ -182,22 +182,28 @@ def _find_in_tree(root: Path, app: str) -> Path | None:
 
 
 def discover(app: str, state_dir: Path | None = None) -> str | None:
-    """Find a managed release first, then fall back to a CLI on PATH."""
+    """Find a working managed release first, then a working CLI on PATH."""
+    candidates: list[str] = []
     if state_dir:
         root = (Path(state_dir) / "crafting-apps" / app).resolve()
         try:
             manifest = json.loads((root / "install.json").read_text(encoding="utf-8"))
             recorded = Path(manifest["path"]).resolve()
             if root in recorded.parents and recorded.name == _binary_name(app) and recorded.is_file() and os.access(recorded, os.X_OK):
-                return str(recorded)
+                candidates.append(str(recorded))
         except Exception:
             pass
         hit = _find_in_tree(root, app)
-        if hit:
-            return str(hit)
+        if hit and str(hit) not in candidates:
+            candidates.append(str(hit))
     path = shutil.which(APPS[app]["cli"])
     if path:
-        return str(Path(path).resolve())
+        system_path = str(Path(path).resolve())
+        if system_path not in candidates:
+            candidates.append(system_path)
+    for candidate in candidates:
+        if probe(app, candidate).get("available"):
+            return candidate
     return None
 
 

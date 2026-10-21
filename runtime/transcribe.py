@@ -79,13 +79,19 @@ def main():
         dependency = ensure_transcription_runtime(Path(__file__).resolve().parents[1])
         if not dependency.get("ok"):
             detail = dependency.get("error") or dependency.get("stderr") or "unknown installation error"
-            raise SystemExit(f"Could not provision local transcription runtime: {detail}")
+            if ns.backend == "faster-whisper":
+                raise SystemExit(f"Could not provision local transcription runtime: {detail}")
+            # Auto mode treats a missing/uninstallable optional backend like a
+            # failed first backend and still tries the independent CLI path.
+            print(f"faster-whisper provisioning failed; trying whisper-cli: {detail}")
     media = Path(ns.media).resolve(); out = Path(ns.out_dir).resolve(); out.mkdir(parents=True, exist_ok=True)
 
     errors = []
     data = None
     if ns.backend in {"auto", "faster-whisper"}:
         try:
+            if not dependency.get("ok"):
+                raise RuntimeError(dependency.get("error") or dependency.get("stderr") or "provisioning failed")
             data = faster_whisper(media, ns.model, ns.device, ns.compute_type, ns.language)
         except Exception as exc:
             errors.append(f"faster-whisper: {exc}")

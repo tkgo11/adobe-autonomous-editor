@@ -357,7 +357,7 @@ class Executor:
                 if backend in {"auto", "faster-whisper"}
                 else {"ok": True, "installed": False, "skipped": True, "reason": f"{backend} does not use faster-whisper"}
             )
-            if not dependency.get("ok"):
+            if not dependency.get("ok") and backend == "faster-whisper":
                 return {"ok": False, "error": "could not provision local transcription runtime", "dependency": dependency}
             out_dir = Path(a.get("outDir", self.job / "analysis" / (Path(a["media"]).stem + "-transcript")))
             cmd = [sys.executable, str(self.skill / "runtime/transcribe.py"), a["media"], "--out-dir", str(out_dir), "--model", str(a.get("model", "large-v3"))]

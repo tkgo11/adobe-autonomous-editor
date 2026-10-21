@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -35,6 +36,16 @@ def _run(command: list[str], **kwargs) -> subprocess.CompletedProcess:
 def _venv_ready(python: Path) -> bool:
     """A partial venv can contain Python before pip is available."""
     if not python.is_file():
+        return False
+    # sys.prefix differs from sys.base_prefix even when the venv was created
+    # with --system-site-packages. Require an explicit isolated configuration.
+    venv_root = python.parents[1]
+    try:
+        config = (venv_root / "pyvenv.cfg").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    include_system = re.search(r"^\s*include-system-site-packages\s*=\s*(true|false)\s*$", config, re.I | re.M)
+    if not include_system or include_system.group(1).lower() != "false":
         return False
     try:
         interpreter = subprocess.run(
