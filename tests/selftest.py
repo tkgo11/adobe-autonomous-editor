@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import py_compile
 import re
@@ -13,6 +14,8 @@ import tempfile
 import time
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SKIPPED = []
@@ -31,6 +34,13 @@ def free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def _write_stock_fixture(job):
+    path = job / "source/downloads/pexels/123.jpg"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"supplementary-media-fixture")
+    return path
 
 
 async def broker_roundtrip(premiere_port, control_port, secret):
@@ -116,16 +126,65 @@ def main():
     # --- In-process unit checks (stdlib-only modules; no Adobe host required) ---
     sys.path.insert(0, str(ROOT / "runtime"))
     sys.path.insert(0, str(ROOT / "scripts"))
-    import ae_rpc, analyze_media, asset_download, qc, source_inventory  # noqa: E402
+    import ae_rpc, analyze_media, asset_download, qc, source_inventory, stock_assets  # noqa: E402
 
     check(asset_download.is_url("https://www.youtube.com/watch?v=abc"), "YouTube URL not recognized")
     check(not asset_download.is_url("/media/clip.mov"), "local path treated as URL")
     check(not asset_download.is_url("file:///media/clip.mov"), "file URL treated as downloadable")
+    check(not asset_download.is_url("https://[::1"), "malformed URL should not crash classification")
+    signed_url = "https://user:password@example.com/clip.mp4?token=private-token"
+    check(asset_download.public_url(signed_url) == "https://example.com/clip.mp4", "source URL credentials were not removed")
     unknown = asset_download.rights_record("https://example.com/video")
     check(unknown["license"] is None and unknown["license_status"] == "review_required", "missing license must require review")
     check("does not grant permission" in unknown["notice"], "missing license notice is unclear")
     licensed = asset_download.rights_record("https://example.com/video", {"license": "CC BY 4.0", "uploader": "Creator"})
     check(licensed["license"] == "CC BY 4.0" and licensed["creator"] == "Creator", "source license metadata lost")
+
+    class FailedTransfer:
+        def __init__(self, options):
+            self.options = options
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            return False
+        def extract_info(self, url, download):
+            if download:
+                raise RuntimeError("transfer failed")
+            return {"title": "Licensed clip", "license": "CC BY 4.0"}
+    with tempfile.TemporaryDirectory() as media_dir, patch.dict(sys.modules, {"yt_dlp": SimpleNamespace(YoutubeDL=FailedTransfer)}):
+        try:
+            asset_download.download("https://example.com/clip", Path(media_dir))
+            raise AssertionError("failed transfer was accepted")
+        except asset_download.DownloadError as exc:
+            check(exc.rights["license"] == "CC BY 4.0", "transfer failure lost fetched rights metadata")
+
+    # Paid search results must remain candidates unless the account has a
+    # redownloadable, non-comp license for that exact asset.
+    with patch.dict("os.environ", {"SHUTTERSTOCK_API_TOKEN": "test-token"}):
+        def stock_response(url, headers=None):
+            if url.endswith("/search?query=forest&per_page=5"):
+                return {"data": [{"id": "42", "description": "forest"}]}
+            return {"data": [{"id": "license-1", "image": {"id": "42"}, "is_downloadable": False}]}
+        with patch.object(stock_assets, "get_json", side_effect=stock_response), patch.object(stock_assets, "post_json") as post:
+            found = stock_assets.search_shutterstock("forest", "image")
+            check(found[0]["license_status"] == "license_required" and found[0]["media_url"] is None,
+                  "unlicensed Shutterstock image was offered for download")
+            check(not post.called, "unlicensed Shutterstock result triggered a download request")
+
+    with tempfile.TemporaryDirectory() as stock_dir:
+        stock_job = Path(stock_dir)
+        stock_item = stock_assets.candidate("pexels", "image", "123", "https://www.pexels.com/photo/123/",
+                                            "https://images.pexels.com/photos/123/photo.jpg", "Forest", "Photographer",
+                                            "Pexels License", stock_assets.LICENSES["pexels"])
+        with patch.object(stock_assets, "PROVIDERS", (lambda query, media_type: [stock_item],)), \
+             patch.object(stock_assets, "save_media", side_effect=lambda item, job: _write_stock_fixture(job)):
+            acquired = stock_assets.acquire(stock_job, [{"media_type": "image", "query": "forest", "reason": "establish location"}])
+        check(len(acquired["downloaded"]) == 1, "supplementary media was not acquired")
+        stock_rights = json.loads((stock_job / "analysis/asset_rights.json").read_text())
+        check(stock_rights["assets"][0]["rights"]["license_url"] == stock_assets.LICENSES["pexels"],
+              "supplementary media license link was not recorded")
+        stock_inventory = json.loads((stock_job / "analysis/source_inventory.json").read_text())
+        check(len(stock_inventory["sources"]) == 1, "supplementary media was not inventoried")
 
     # AE JSX generation: payload text must survive placeholder substitution and
     # ES3 line terminators must be escaped.
@@ -267,6 +326,31 @@ def main():
             check(init["status"] == "BLOCKED" and init["blockers"], "init_state should be BLOCKED with blockers")
             check((job / "logs/initialize.log").stat().st_size > 0, "initialize.log not written")
             check(list((job / "recovery/init-history").glob("init-*.json")), "init history snapshot missing")
+
+            # A resumed URL import must use its verified local copy and never
+            # write the URL's credentials to retained job reports.
+            cached_job = td / "cached-job"
+            downloaded = cached_job / "source/downloads/Example/clip.mp4"
+            downloaded.parent.mkdir(parents=True)
+            downloaded.write_bytes(b"cached-media")
+            cache = {hashlib.sha256(signed_url.encode()).hexdigest(): {
+                "paths": [str(downloaded)],
+                "fingerprints": {str(downloaded): source_inventory.fingerprint(downloaded)},
+                "rights": asset_download.rights_record(signed_url),
+            }}
+            (cached_job / "analysis").mkdir()
+            (cached_job / "analysis/download_cache.json").write_text(json.dumps(cache))
+            r = subprocess.run(
+                [sys.executable, str(ROOT / "runtime/initialize.py"), "--job-root", str(cached_job),
+                 "--skill-root", str(ROOT), "--source", signed_url],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            check(r.returncode in (0, 2), f"cached URL initialization crashed: {r.stderr[-400:]}")
+            cached_init = json.loads((cached_job / "plans/init_state.json").read_text())
+            check(cached_init["source_files_found"] == 1, "resumed URL source was not reused")
+            for report in (cached_job / "analysis").glob("*.json"):
+                check("private-token" not in report.read_text() and "password" not in report.read_text(),
+                      f"credentials leaked into {report.name}")
 
         # Exercise the real WebSocket broker with a mock Premiere client.
         try:

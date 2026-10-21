@@ -22,7 +22,8 @@ import uuid
 from pathlib import Path
 
 from broker_util import read_json, start_broker
-from asset_download import download, is_url, rights_record, write_rights_report
+from asset_download import DownloadError, download, is_url, public_url, rights_record, write_rights_report
+from source_inventory import fingerprint
 from package_bridge import package as package_bridge
 from rpc_client import call as ws_call
 
@@ -98,6 +99,24 @@ def read_source_inventory(path: Path):
         return {"sources": []}
 
 
+def valid_download_cache(entry: dict, job: Path) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    paths = entry.get("paths", [])
+    if not paths or not isinstance(entry.get("rights"), dict):
+        return False
+    root = (job / "source/downloads").resolve()
+    try:
+        return all(
+            Path(p).is_file() and Path(p).stat().st_size > 0
+            and Path(p).resolve().is_relative_to(root)
+            and fingerprint(Path(p)) == entry.get("fingerprints", {}).get(p)
+            for p in paths
+        )
+    except (OSError, TypeError, ValueError):
+        return False
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--job-root", required=True)
@@ -147,16 +166,35 @@ def main():
     resolved_sources = []
     rights_records = []
     download_errors = []
+    cache_path = job / "analysis/download_cache.json"
+    try:
+        download_cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        download_cache = {}
     for source in ns.source:
-        if is_url(source):
+        if source.lower().startswith(("http://", "https://")):
+            public_source = public_url(source)
             try:
+                if not is_url(source):
+                    raise ValueError("Invalid HTTP(S) source URL")
+                key = hashlib.sha256(source.encode("utf-8")).hexdigest()
+                cached = download_cache.get(key, {})
+                if valid_download_cache(cached, job):
+                    resolved_sources.extend(cached["paths"])
+                    rights_records.append({"paths": cached["paths"], "rights": cached["rights"]})
+                    continue
                 result = download(source, job)
                 resolved_sources.extend(result["paths"])
                 rights_records.append({"paths": result["paths"], "rights": result["rights"]})
+                download_cache[key] = {"paths": result["paths"], "rights": result["rights"],
+                                       "fingerprints": {p: fingerprint(Path(p)) for p in result["paths"]}}
+                cache_path.write_text(json.dumps(download_cache, indent=2, ensure_ascii=False), encoding="utf-8")
             except Exception as exc:
-                error = str(exc)
-                download_errors.append(f"{source}: {error}")
-                rights_records.append({"paths": [], "rights": rights_record(source, error=error)})
+                error = str(exc) if isinstance(exc, ValueError) and str(exc) == "Invalid HTTP(S) source URL" else type(exc).__name__
+                download_errors.append(f"{public_source}: {error}")
+                rights = exc.rights if isinstance(exc, DownloadError) else rights_record(source)
+                rights["error"] = error
+                rights_records.append({"paths": [], "rights": rights})
         else:
             resolved_sources.append(source)
     if rights_records:

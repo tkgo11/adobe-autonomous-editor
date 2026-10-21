@@ -3,21 +3,51 @@
 from __future__ import annotations
 
 import json
+import re
+import shutil
+import time
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlsplit, urlunsplit
+
+MAX_BYTES = 2 * 1024 * 1024 * 1024
+MAX_SECONDS = 2 * 60 * 60
+
+
+class DownloadError(RuntimeError):
+    def __init__(self, message: str, rights: dict):
+        super().__init__(message)
+        self.rights = rights
+
+
+def public_url(value: str) -> str:
+    """Return a source reference without userinfo, query credentials, or fragment."""
+    try:
+        parsed = urlsplit(value)
+        host = parsed.hostname or ""
+        if not host:
+            return "<invalid URL>"
+        if ":" in host:
+            host = f"[{host}]"
+        netloc = host + (f":{parsed.port}" if parsed.port else "")
+        return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+    except ValueError:
+        return "<invalid URL>"
 
 
 def is_url(value: str) -> bool:
-    parsed = urlparse(value)
-    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+    try:
+        parsed = urlsplit(value)
+        return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+    except ValueError:
+        return False
 
 
 def rights_record(url: str, info: dict | None = None, error: str | None = None) -> dict:
     info = info or {}
     license_name = info.get("license") or None
     return {
-        "source_url": url,
-        "webpage_url": info.get("webpage_url") or url,
+        "source_url": public_url(url),
+        "webpage_url": public_url(info.get("webpage_url") or url),
         "title": info.get("title"),
         "creator": info.get("creator") or info.get("uploader") or info.get("channel"),
         "license": license_name,
@@ -50,23 +80,51 @@ def download(url: str, job: Path) -> dict:
         "nooverwrites": True,
         "quiet": True,
         "no_warnings": True,
+        "socket_timeout": 30,
+        "retries": 2,
+        "fragment_retries": 2,
+        "max_filesize": MAX_BYTES,
     }
+    if not shutil.which("ffmpeg"):
+        options["format"] = "best"  # Choose a single combined rendition when merging is unavailable.
+    started = time.monotonic()
+
+    def progress(status):
+        if time.monotonic() - started > MAX_SECONDS:
+            raise RuntimeError("Download exceeded the two-hour time limit")
+        size = status.get("downloaded_bytes") or status.get("total_bytes") or status.get("total_bytes_estimate") or 0
+        if size > MAX_BYTES:
+            raise RuntimeError("Download exceeded the 2 GB size limit")
+
+    options["progress_hooks"] = [progress]
     with yt_dlp.YoutubeDL(options) as ydl:
         info = ydl.extract_info(url, download=False)
         if not isinstance(info, dict) or info.get("_type") in {"playlist", "multi_video"}:
             raise RuntimeError("Expected a single media item, not a playlist")
         rights = rights_record(url, info)
-        result = ydl.extract_info(url, download=True)
-        if not isinstance(result, dict):
-            raise RuntimeError("Downloader returned no media details")
-        candidates = [result.get("filepath"), ydl.prepare_filename(result)]
-        candidates.extend(item.get("filepath") for item in result.get("requested_downloads", []))
-        paths = [Path(p).resolve() for p in candidates if p]
-        paths = [p for p in paths if p.is_file() and p.is_relative_to(destination.resolve())]
-        # The first path is the final output when yt-dlp merges separate streams.
-        paths = paths[:1]
-        if not paths:
-            raise RuntimeError("Downloader reported success but no local media file was found")
+        try:
+            if info.get("is_live") or info.get("live_status") in {"is_live", "is_upcoming"}:
+                raise RuntimeError("Live and upcoming streams are not supported")
+            if (info.get("duration") or 0) > MAX_SECONDS:
+                raise RuntimeError("Media exceeds the two-hour duration limit")
+            if (info.get("filesize") or info.get("filesize_approx") or 0) > MAX_BYTES:
+                raise RuntimeError("Media exceeds the 2 GB size limit")
+            result = ydl.extract_info(url, download=True)
+            if not isinstance(result, dict):
+                raise RuntimeError("Downloader returned no media details")
+            final = [result.get("filepath"), ydl.prepare_filename(result)]
+            paths = [Path(p).resolve() for p in final if p]
+            paths = [p for p in paths if p.is_file() and p.is_relative_to(destination.resolve())]
+            components = [Path(item["filepath"]).resolve() for item in result.get("requested_downloads", []) if item.get("filepath")]
+            components = [p for p in components if p.is_file() and p.is_relative_to(destination.resolve())]
+            if len(components) > 1 and (not paths or paths[0] in components):
+                raise RuntimeError("Separate audio/video streams could not be merged")
+            if not paths:
+                paths = components
+            if not paths:
+                raise RuntimeError("Downloader reported success but no local media file was found")
+        except Exception as exc:
+            raise DownloadError(str(exc), rights) from exc
     return {"paths": [str(p) for p in paths], "rights": rights}
 
 
@@ -75,19 +133,25 @@ def write_rights_report(job: Path, records: list[dict]) -> None:
     target.mkdir(parents=True, exist_ok=True)
     (target / "asset_rights.json").write_text(json.dumps({"assets": records}, indent=2, ensure_ascii=False), encoding="utf-8")
     lines = ["# Downloaded asset rights", "", "Review each asset's license and source terms before use or publication.", ""]
+    def safe(value):
+        value = re.sub(r"\s+", " ", str(value or ""))
+        return re.sub(r"([\\`*_[\]#<>|])", r"\\\1", value)
+
     for record in records:
         rights = record["rights"]
         lines.extend([
-            f"## {rights.get('title') or rights['source_url']}", "",
-            f"- Source: {rights['webpage_url']}",
-            f"- Creator: {rights.get('creator') or 'Not provided'}",
-            f"- License: {rights.get('license') or 'Not provided by source'}",
-            f"- Status: {rights['license_status']}",
-            f"- Notice: {rights['notice']}",
-            f"- Terms: {rights['terms_notice']}",
-            f"- Local files: {', '.join(record.get('paths', [])) or 'None'}",
+            f"## {safe(rights.get('title') or rights['source_url'])}", "",
+            f"- Source: {safe(rights['webpage_url'])}",
+            f"- Creator: {safe(rights.get('creator') or 'Not provided')}",
+            f"- License: {safe(rights.get('license') or 'Not provided by source')}",
+            f"- License terms: {safe(rights.get('license_url') or 'Not provided by source')}",
+            f"- Attribution required: {safe(rights.get('attribution') or 'Check license terms')}",
+            f"- Status: {safe(rights['license_status'])}",
+            f"- Notice: {safe(rights['notice'])}",
+            f"- Terms: {safe(rights['terms_notice'])}",
+            f"- Local files: {safe(', '.join(record.get('paths', [])) or 'None')}",
         ])
         if rights.get("error"):
-            lines.append(f"- Download error: {rights['error']}")
+            lines.append(f"- Download error: {safe(rights['error'])}")
         lines.append("")
     (target / "asset_rights.md").write_text("\n".join(lines), encoding="utf-8")

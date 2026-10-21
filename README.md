@@ -153,6 +153,14 @@ It creates/resumes the job workspace, inventories source files read-only, discov
 
 `-Source` also accepts individual media URLs supported by `yt-dlp`, including YouTube URLs. The initializer downloads each URL into the job's `source/downloads/` directory only when a URL is supplied, then inventories the local file. It does not download playlists. Downloaded media and any source-provided license metadata are recorded in `analysis/asset_rights.json` and `analysis/asset_rights.md`. A missing license is marked as unknown, and every downloaded asset requires a rights and site-terms review before use or publication. A download alone grants no reuse rights.
 
+After source analysis, the editor can identify missing supporting images or footage itself. It records each specific need in `plans/asset_needs.json` and runs `runtime/stock_assets.py`. The tool searches Pexels, Pixabay, Wikimedia Commons, and Shutterstock; downloads a suitable result for each need when rights allow; and updates the source inventory, candidate log, and rights report. Commons needs no API key. Set `PEXELS_API_KEY`, `PIXABAY_API_KEY`, or `SHUTTERSTOCK_API_TOKEN` to enable those providers. Shutterstock search results without an existing redownloadable license remain candidates only. The editor must inspect downloaded media and verify license terms, attribution, and releases before delivery.
+
+Example need file:
+
+```json
+[{"media_type":"video","query":"city skyline at dusk","reason":"establish location before interview"}]
+```
+
 The machine bridge secret is stored under the local user profile and reused across jobs, avoiding a new plugin installation for every edit.
 
 ## Typical unattended bootstrap on Windows
