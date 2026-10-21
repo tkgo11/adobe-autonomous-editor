@@ -22,6 +22,7 @@ import uuid
 from pathlib import Path
 
 from broker_util import read_json, start_broker
+from asset_download import download, is_url, rights_record, write_rights_report
 from package_bridge import package as package_bridge
 from rpc_client import call as ws_call
 
@@ -143,12 +144,31 @@ def main():
 
     inventory_path = job / "analysis/source_inventory.json"
     inventory_run = {"returncode": 2, "stderr": "no sources supplied"}
-    if ns.source:
-        inv_cmd = [sys.executable, str(skill / "runtime/source_inventory.py"), *ns.source, "--out", str(inventory_path)]
+    resolved_sources = []
+    rights_records = []
+    download_errors = []
+    for source in ns.source:
+        if is_url(source):
+            try:
+                result = download(source, job)
+                resolved_sources.extend(result["paths"])
+                rights_records.append({"paths": result["paths"], "rights": result["rights"]})
+            except Exception as exc:
+                error = str(exc)
+                download_errors.append(f"{source}: {error}")
+                rights_records.append({"paths": [], "rights": rights_record(source, error=error)})
+        else:
+            resolved_sources.append(source)
+    if rights_records:
+        write_rights_report(job, rights_records)
+    if resolved_sources:
+        inv_cmd = [sys.executable, str(skill / "runtime/source_inventory.py"), *resolved_sources, "--out", str(inventory_path)]
         p = subprocess.run(inv_cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         inventory_run = {"returncode": p.returncode, "stdout": p.stdout[-8000:], "stderr": p.stderr[-8000:]}
     else:
         inventory_path.write_text(json.dumps({"sources": []}, indent=2), encoding="utf-8")
+    if download_errors:
+        inventory_run["download_errors"] = download_errors
 
     tools = {
         "python": sys.executable,
@@ -282,7 +302,7 @@ def main():
     ae_control = not tools["afterfx"] or bool(ae_probe.get("script_rpc")) or uia["available"]
     media_qc = bool(tools["ffmpeg"] and tools["ffprobe"])
 
-    if not sources_ok or not adobe_any:
+    if not sources_ok or download_errors or not adobe_any:
         status = "BLOCKED"
     elif premiere_control and ae_control and media_qc and (not tools["premiere"] or broker.get("premiere_connected")) and (not tools["afterfx"] or ae_probe.get("script_rpc")):
         status = "READY"
@@ -311,6 +331,7 @@ def main():
     blockers = []
     if not sources_ok:
         blockers.append("no readable source media in inventory")
+    blockers.extend(f"source download failed: {error}" for error in download_errors)
     if not adobe_any:
         blockers.append("no Adobe host found (Premiere Pro / After Effects)")
 
@@ -326,6 +347,7 @@ def main():
         "initialized_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "job_root": str(job),
         "source_inventory": "analysis/source_inventory.json",
+        "asset_rights": "analysis/asset_rights.md" if rights_records else None,
         "environment": "analysis/environment.json",
         "capability_matrix": "plans/capability_matrix.json",
         "preferred_premiere_surface": "uxp" if broker.get("premiere_connected") else ("uia" if uia["available"] else None),

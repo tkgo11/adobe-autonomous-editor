@@ -116,7 +116,16 @@ def main():
     # --- In-process unit checks (stdlib-only modules; no Adobe host required) ---
     sys.path.insert(0, str(ROOT / "runtime"))
     sys.path.insert(0, str(ROOT / "scripts"))
-    import ae_rpc, analyze_media, qc, source_inventory  # noqa: E402
+    import ae_rpc, analyze_media, asset_download, qc, source_inventory  # noqa: E402
+
+    check(asset_download.is_url("https://www.youtube.com/watch?v=abc"), "YouTube URL not recognized")
+    check(not asset_download.is_url("/media/clip.mov"), "local path treated as URL")
+    check(not asset_download.is_url("file:///media/clip.mov"), "file URL treated as downloadable")
+    unknown = asset_download.rights_record("https://example.com/video")
+    check(unknown["license"] is None and unknown["license_status"] == "review_required", "missing license must require review")
+    check("does not grant permission" in unknown["notice"], "missing license notice is unclear")
+    licensed = asset_download.rights_record("https://example.com/video", {"license": "CC BY 4.0", "uploader": "Creator"})
+    check(licensed["license"] == "CC BY 4.0" and licensed["creator"] == "Creator", "source license metadata lost")
 
     # AE JSX generation: payload text must survive placeholder substitution and
     # ES3 line terminators must be escaped.

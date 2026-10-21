@@ -151,6 +151,8 @@ It creates/resumes the job workspace, inventories source files read-only, discov
 - `plans/capability_matrix.json`
 - `plans/init_state.json`
 
+`-Source` also accepts individual media URLs supported by `yt-dlp`, including YouTube URLs. The initializer downloads each URL into the job's `source/downloads/` directory only when a URL is supplied, then inventories the local file. It does not download playlists. Downloaded media and any source-provided license metadata are recorded in `analysis/asset_rights.json` and `analysis/asset_rights.md`. A missing license is marked as unknown, and every downloaded asset requires a rights and site-terms review before use or publication. A download alone grants no reuse rights.
+
 The machine bridge secret is stored under the local user profile and reused across jobs, avoiding a new plugin installation for every edit.
 
 ## Typical unattended bootstrap on Windows
