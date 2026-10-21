@@ -17,6 +17,7 @@ import tempfile
 import time
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SKIPPED = []
@@ -129,6 +130,7 @@ def main():
     check('if(-not $NoAuto){$initArgs += "--auto"}' in windows_initializer and "$explicit" not in windows_initializer, "PowerShell Crafting switches suppress automatic media provisioning")
     windows_provisioner = (ROOT / "scripts/provision_python.ps1").read_text(encoding="utf-8")
     check("function Test-PipVenv" in windows_provisioner and "-m venv" in windows_provisioner and "-m pip --version" in windows_provisioner, "Windows Python compatibility probe does not verify a pip-enabled venv")
+    check("Test-PipVenv -Python $python" in windows_provisioner and "Remove-Item -LiteralPath $target -Recurse -Force" in windows_provisioner, "Windows managed Python reuse does not validate and repair incomplete installations")
     shell_installer = (ROOT / "install.sh").read_text(encoding="utf-8")
     ps_installer = (ROOT / "install.ps1").read_text(encoding="utf-8")
     check("validation_python" in shell_installer and "sys.version_info >= (3,10)" in shell_installer, "Unix installer does not gate validation on Python 3.10+")
@@ -143,6 +145,19 @@ def main():
     check(toolchain._mac_asset_names("arm64") == ("ffmpeg-darwin-arm64", "ffprobe-darwin-arm64"), "macOS arm64 ffmpeg assets mismatch")
     check(toolchain._mac_asset_names("x86_64") == ("ffmpeg-darwin-x64", "ffprobe-darwin-x64"), "macOS x64 ffmpeg assets mismatch")
     check(bootstrap._venv_python(Path("venv")).name in {"python", "python.exe"}, "venv Python resolution failed")
+    check(bootstrap._runtime_imports("nt") == ("websockets", "jsonschema", "psutil", "pywinauto", "pyautogui"), "Windows runtime reuse probe omitted desktop dependencies")
+    check(bootstrap._runtime_imports("posix") == ("websockets", "jsonschema", "psutil"), "non-Windows runtime probe includes Windows-only dependencies")
+    with tempfile.TemporaryDirectory() as state_test_temp:
+        readonly_home = Path(state_test_temp) / "readonly-home"
+        fallback_temp = Path(state_test_temp) / "fallback-temp"
+        fallback_temp.mkdir()
+        original_access = os.access
+        with mock.patch.object(initializer.Path, "home", return_value=readonly_home):
+            with mock.patch.object(initializer.tempfile, "gettempdir", return_value=str(fallback_temp)):
+                with mock.patch.object(initializer.os, "access", side_effect=lambda path, mode: False if Path(path) == readonly_home / ".adobe-autonomous-editor" else original_access(path, mode)):
+                    fallback_one = initializer.machine_state_dir(None, Path("/jobs/one/job"))
+                    fallback_two = initializer.machine_state_dir(None, Path("/other/two/job"))
+        check(fallback_one == fallback_two, "machine state fallback differs across job directories")
     original_path = os.environ.get("PATH", "")
     try:
         toolchain.restore_media_path({"tools": {"ffmpeg": sys.executable}})

@@ -17,6 +17,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -125,17 +126,17 @@ def initialization_status(
 def machine_state_dir(explicit_dir, job: Path):
     """Return a writable directory for state shared by jobs on this machine.
 
-    Desktop installs normally use the user's home directory.  Some managed
-    runners expose that directory as read-only, so fall back to the parent of
-    the job root instead of failing before the initializer can report its
-    capability state.  An explicit directory is never silently replaced.
+    Desktop installs normally use the user's home directory. Some managed
+    runners expose that directory as read-only, so use a stable per-user temp
+    cache rather than tying machine-wide state to a particular job directory.
+    An explicit directory is never silently replaced.
     """
     if explicit_dir:
         candidates = [Path(explicit_dir).expanduser()]
     else:
         candidates = [
             Path.home() / ".adobe-autonomous-editor",
-            job.parent / ".adobe-autonomous-editor",
+            _fallback_machine_state_dir(),
         ]
 
     for candidate in candidates:
@@ -149,6 +150,16 @@ def machine_state_dir(explicit_dir, job: Path):
     if explicit_dir:
         raise RuntimeError(f"State directory is not usable: {explicit_dir}")
     raise RuntimeError("Could not create a writable machine state directory")
+
+
+def _fallback_machine_state_dir() -> Path:
+    """Return a stable, per-user state path when the home directory is read-only."""
+    if hasattr(os, "getuid"):
+        identity = f"uid-{os.getuid()}"
+    else:
+        import getpass
+        identity = "user-" + "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in getpass.getuser())
+    return Path(tempfile.gettempdir()) / f"adobe-autonomous-editor-{identity}"
 
 
 def main():

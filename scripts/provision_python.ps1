@@ -65,7 +65,15 @@ switch($arch) {
 $runtime = Join-Path $JobRoot "runtime"
 $target = Join-Path $runtime "python-base"
 $python = Join-Path $target "python.exe"
-if(Test-Path $python) { Write-Output $python; exit 0 }
+if(Test-Path -LiteralPath $target) {
+  if((Test-Path -LiteralPath $python) -and (Test-PipVenv -Python $python)) {
+    Write-Output $python
+    exit 0
+  }
+  # The job-local installation is incomplete or no longer supports venvs.
+  # Remove only this installer-owned target before repairing it.
+  Remove-Item -LiteralPath $target -Recurse -Force
+}
 
 $downloads = Join-Path $runtime "bootstrap-downloads"
 New-Item -ItemType Directory -Force -Path $downloads | Out-Null

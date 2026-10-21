@@ -63,6 +63,13 @@ def _venv_ready(python: Path) -> bool:
         return False
 
 
+def _runtime_imports(platform_name: str | None = None) -> tuple[str, ...]:
+    imports = ["websockets", "jsonschema", "psutil"]
+    if (platform_name or os.name) == "nt":
+        imports.extend(("pywinauto", "pyautogui"))
+    return tuple(imports)
+
+
 def prepare_runtime(job: Path, skill: Path) -> tuple[Path, dict]:
     requirements = skill / "runtime/requirements.txt"
     if not requirements.is_file():
@@ -91,8 +98,9 @@ def prepare_runtime(job: Path, skill: Path) -> tuple[Path, dict]:
         pass
     install_needed = rebuilt or prior.get("requirements_sha256") != wanted
     if not install_needed:
+        imports = ",".join(_runtime_imports())
         probe = subprocess.run(
-            [str(python), "-c", "import websockets,jsonschema,psutil"],
+            [str(python), "-c", f"import {imports}"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
