@@ -187,7 +187,7 @@ The machine bridge secret is stored under the local user profile and reused acro
   -Brief "Create a polished 60-second vertical product video"
 ```
 
-`initialize_job.ps1` defaults to autonomous bootstrap when no control switches are supplied: it installs/updates the bridge when needed, starts/reuses the broker, and launches Premiere for probing. Use `-NoAuto` only for debugging/manual setup.
+`initialize_job.ps1` defaults to autonomous bootstrap when no control switches are supplied. Crafting-first jobs defer Premiere activation until a selected fallback needs it. Adobe-only jobs set up the Premiere bridge and broker only when Premiere Pro is installed, and can still probe After Effects when Premiere Pro is absent. Use `-NoAuto` only for debugging/manual setup.
 
 `initialize_job.ps1` provisions a compatible per-job Python base on Windows when none is installed, then `runtime/bootstrap.py` creates a job-local virtual environment and installs the declared runtime dependencies. Initialization also installs a machine-local ffmpeg/ffprobe bundle when the tools are absent. A transcription action installs its optional ML stack on first use. If first-time `.ccx` installation requires OS/Adobe permission approval, the agent should automate permitted visible UI where possible; it must not bypass UAC, Adobe licensing, or security policy.
 
@@ -222,7 +222,17 @@ A machine-readable execution plan can mix content analysis and control surfaces 
 }
 ```
 
-Run with `runtime/execute_plan.py`. Each stage returns structured success/error data and writes an execution report. If a Crafting Apps action fails and selects a Premiere fallback that was not active during initialization, the executor installs/reuses the packaged bridge, starts the broker, launches Premiere, probes connectivity, and retries the Adobe operation automatically.
+Run follow-on commands through `scripts/run_runtime.ps1` on Windows or `scripts/run_runtime.sh` on macOS/Linux. These launch the requested tool with the job's virtual environment, which contains the dependencies installed during initialization. For example:
+
+```powershell
+./scripts/run_runtime.ps1 -JobRoot "D:\EditJobs\job-001" -SkillRoot "D:\skills\adobe-autonomous-editor" -Command execute_plan -Arguments @("D:\EditJobs\job-001\plans\plan.json", "--job-root", "D:\EditJobs\job-001", "--skill-root", "D:\skills\adobe-autonomous-editor")
+```
+
+```bash
+./scripts/run_runtime.sh "$HOME/EditJobs/job-001" "$HOME/.agents/skills/adobe-autonomous-editor" execute_plan "$HOME/EditJobs/job-001/plans/plan.json" --job-root "$HOME/EditJobs/job-001" --skill-root "$HOME/.agents/skills/adobe-autonomous-editor"
+```
+
+The same wrappers support `analyze_media`, `transcribe`, `review_packet`, `qc`, and other listed runtime commands. Each stage returns structured success/error data and writes an execution report. If a Crafting Apps action fails and selects a Premiere fallback that was not active during initialization, the executor installs/reuses the packaged bridge, starts the broker, launches Premiere, probes connectivity, and retries the Adobe operation automatically.
 
 ## Render verification
 
@@ -258,6 +268,7 @@ Composable overlays:
 - `runtime/orchestrator.py` — authenticated loopback broker.
 - `runtime/crafting_apps.py` — verified FilmCraft/EffectCraft CLI installer, discovery, probe, and runner.
 - `runtime/bootstrap.py` — standard-library isolated Python dependency bootstrap.
+- `scripts/run_runtime.ps1` / `scripts/run_runtime.sh` — run subsequent commands using the job virtual environment.
 - `runtime/toolchain.py` — machine-local ffmpeg/ffprobe bootstrap and path restoration.
 - `runtime/rpc_client.py` — controller CLI.
 - `runtime/package_bridge.py` — per-machine-secret `.ccx` generator.

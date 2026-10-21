@@ -289,7 +289,8 @@ def _run_steps_macos(steps):
                 path=Path(s["path"]).resolve();path.parent.mkdir(parents=True,exist_ok=True)
                 capture=shutil.which("screencapture") or "/usr/sbin/screencapture"
                 command=[capture,"-x"]
-                if s.get("windowOnly",True):
+                window_only = s.get("windowOnly", current is not None)
+                if window_only:
                     if current is None:
                         raise RuntimeError("windowOnly screenshot requires a focused or waited-for window")
                     if not current.get("window_id"):

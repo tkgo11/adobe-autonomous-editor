@@ -756,11 +756,11 @@ When this skill is invoked:
 3. Execute `skills/initialize/SKILL.md` through `scripts/initialize_job.ps1` on Windows or `scripts/initialize_job.sh` on macOS/Linux; both reach the standard-library `runtime/bootstrap.py` entry point with `--auto --editor-priority crafting-first`. It must provision Python/runtime packages and ffmpeg/ffprobe, install/probe checksum-verified FilmCraft/EffectCraft CLIs, and prepare platform-available Adobe fallback surfaces. Do not invoke `runtime/initialize.py` directly on an unprepared machine.
 4. Consume `plans/capability_matrix.json`; use FilmCraft/EffectCraft capabilities first. Launch or repair an Adobe surface only when a required Crafting Apps capability is absent, failed, or unverifiable.
 5. Read `workflows/manifest.json` and select/load only relevant workflow modules.
-6. Analyze media once with `runtime/analyze_media.py --environment <job>/analysis/environment.json`; pass the same `--environment` option to standalone `runtime/review_packet.py` and `scripts/qc.py` calls so machine-local ffmpeg/ffprobe paths are restored (nearby job outputs are also auto-discovered). When speech matters, run local `runtime/transcribe.py` (install optional ML dependencies automatically when permitted), then share analysis/transcript across modules and deliverables.
+6. Run later Python commands through `scripts/run_runtime.sh` on macOS/Linux (`<job> <skill> <command> <args...>`) or `scripts/run_runtime.ps1` on Windows (`-JobRoot <job> -SkillRoot <skill> -Command <command> -Arguments <args...>`) so they use the job's provisioned virtual environment. Analyze media once with the `analyze_media` command; when speech matters, use `transcribe` (which installs optional ML dependencies automatically when permitted), then share analysis/transcript across modules and deliverables.
 7. Write the modular edit spec and a machine-readable execution plan. Encode fragile operations with `retries`, an independent `verify` action, and ordered `fallbacks` so a single API gap does not stop the job.
-8. Execute using `runtime/execute_plan.py` with `filmcraft`/`effectcraft` primary actions and Premiere/After Effects ordered fallbacks. Start `runtime/supervisor.py` only when Adobe fallback work is active for a long unattended job.
+8. Execute using the `execute_plan` command with `filmcraft`/`effectcraft` primary actions and Premiere/After Effects ordered fallbacks. Start the `supervisor` command only when Adobe fallback work is active for a long unattended job.
 9. Render a review version.
-10. Generate `runtime/review_packet.py` evidence and inspect it multimodally.
+10. Generate `review_packet` evidence and inspect it multimodally.
 11. Repair against universal + module-specific QC gates and rerender until thresholds pass or a truthful external blocker is reached.
 12. Render final deliverables and run objective QC.
 13. Return concise paths/results and summarize assumptions or substitutions.
@@ -778,6 +778,7 @@ Use the accompanying files as building blocks:
 - `scripts/initialize_job.ps1` — Windows wrapper for executable initialization.
 - `scripts/provision_python.sh` — checksum-verified `uv`/Python bootstrap for macOS and Linux.
 - `scripts/initialize_job.sh` — macOS/Linux wrapper for executable initialization.
+- `scripts/run_runtime.ps1` / `scripts/run_runtime.sh` — run analysis, execution, review, QC, and other follow-on commands with the initialized job's Python environment.
 - `scripts/install_premiere_bridge.ps1` — Adobe UPIA `.ccx` install helper.
 - `scripts/start_orchestrator.ps1` — background loopback broker launcher.
 - `scripts/ae_dispatch.ps1` — low-level JSX launcher retained for one-off scripts.

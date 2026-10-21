@@ -228,9 +228,6 @@ def main():
     # Adobe fallback only after the matching Crafting capability is required.
     adobe_required = ns.editor_priority == "adobe-only"
     auto_needs_adobe = should_prepare_adobe(ns.editor_priority, ns.auto)
-    if auto_needs_adobe:
-        ns.install_bridge = True
-        ns.start_broker = True
 
     tools = {
         "python": sys.executable,
@@ -245,6 +242,10 @@ def main():
         "filmcraft_cli": crafting["filmcraft"].get("path"),
         "effectcraft_cli": crafting["effectcraft"].get("path"),
     }
+    auto_needs_premiere = auto_needs_adobe and bool(tools["premiere"])
+    if auto_needs_premiere:
+        ns.install_bridge = True
+        ns.start_broker = True
     versions = {k: product_version(v) for k, v in tools.items() if k in {"premiere", "afterfx", "aerender", "media_encoder"}}
     env = {"timestamp": time.time(), "platform": platform.platform(), "machine": platform.machine(), "tools": tools, "versions": versions}
     try:
@@ -302,7 +303,7 @@ def main():
     broker["premiere_connected"] = bool(ping.get("ok"))
     broker["rpc_probe"] = ping
 
-    if (ns.launch_premiere or auto_needs_adobe) and tools["premiere"] and broker.get("broker_reachable") and not broker.get("premiere_connected"):
+    if (ns.launch_premiere or auto_needs_premiere) and tools["premiere"] and broker.get("broker_reachable") and not broker.get("premiere_connected"):
         try:
             launch_application(tools["premiere"])
             broker["premiere_launch_attempted"] = True

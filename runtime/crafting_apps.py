@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import uuid
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -227,8 +228,6 @@ def install(app: str, state_dir: Path, force: bool = False, timeout: float = 300
     existing_probe = probe(app, existing) if existing else None
     if existing_probe and existing_probe.get("available") and not force:
         return {"app": app, "ok": True, "installed": False, "reused": True, "path": existing, "probe": existing_probe}
-    repair_existing = bool(existing and existing_probe and not existing_probe.get("available"))
-
     result = {"app": app, "ok": False, "installed": False, "reused": False, "path": None}
     try:
         version = latest_version(APPS[app]["repo"])
@@ -248,23 +247,28 @@ def install(app: str, state_dir: Path, force: bool = False, timeout: float = 300
             raise RuntimeError(f"Checksum mismatch for {artifact}: expected {expected}, got {actual}")
 
         releases = root / "releases"
+        releases.mkdir(parents=True, exist_ok=True)
         final = releases / version
-        if final.exists() and (force or repair_existing):
-            shutil.rmtree(final)
-        if not final.exists():
-            releases.mkdir(parents=True, exist_ok=True)
-            with tempfile.TemporaryDirectory(prefix=f".{app}-{version}-", dir=str(releases)) as temp_raw:
-                temp = Path(temp_raw)
-                _extract(archive, temp)
-                Path(temp_raw).replace(final)
+        # Never overwrite an installed release before the replacement is
+        # extracted and verified. A content-addressed directory also lets a
+        # forced reinstall of the same version coexist with its current copy.
+        if final.exists():
+            final = releases / f"{version}-{actual[:12]}-{uuid.uuid4().hex[:8]}"
+        with tempfile.TemporaryDirectory(prefix=f".{app}-{version}-stage-", dir=str(releases)) as temp_raw:
+            staged = Path(temp_raw)
+            _extract(archive, staged)
+            binary = _find_in_tree(staged, app)
+            if not binary:
+                raise RuntimeError(f"{_binary_name(app)} was not present in {artifact}")
+            if platform.system() != "Windows":
+                binary.chmod(binary.stat().st_mode | 0o700)
+            checked = probe(app, str(binary))
+            if not checked.get("available"):
+                raise RuntimeError(f"Installed CLI failed its version probe: {checked.get('error') or checked.get('stderr')}")
+            Path(temp_raw).replace(final)
         binary = _find_in_tree(final, app)
         if not binary:
-            raise RuntimeError(f"{_binary_name(app)} was not present in {artifact}")
-        if platform.system() != "Windows":
-            binary.chmod(binary.stat().st_mode | 0o700)
-        checked = probe(app, str(binary))
-        if not checked.get("available"):
-            raise RuntimeError(f"Installed CLI failed its version probe: {checked.get('error') or checked.get('stderr')}")
+            raise RuntimeError(f"Validated CLI disappeared after installation: {final}")
         manifest = {
             "schema_version": 1,
             "app": app,
@@ -274,7 +278,10 @@ def install(app: str, state_dir: Path, force: bool = False, timeout: float = 300
             "sha256": actual,
             "path": str(binary),
         }
-        (root / "install.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        manifest_path = root / "install.json"
+        temporary_manifest = root / f"install.json.{uuid.uuid4().hex}.tmp"
+        temporary_manifest.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        temporary_manifest.replace(manifest_path)
         result.update({"ok": True, "installed": True, "version": version, "artifact": artifact, "sha256": actual, "path": str(binary), "probe": checked})
     except Exception as exc:
         result["error"] = str(exc)
