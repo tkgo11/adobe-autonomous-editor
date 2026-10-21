@@ -32,6 +32,26 @@ def _run(command: list[str], **kwargs) -> subprocess.CompletedProcess:
     return result
 
 
+def _venv_ready(python: Path) -> bool:
+    """A partial venv can contain Python before pip is available."""
+    if not python.is_file():
+        return False
+    try:
+        interpreter = subprocess.run(
+            [str(python), "-c", "import sys; assert sys.prefix != sys.base_prefix"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30,
+        )
+        if interpreter.returncode:
+            return False
+        pip = subprocess.run(
+            [str(python), "-m", "pip", "--version"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30,
+        )
+        return pip.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def prepare_runtime(job: Path, skill: Path) -> tuple[Path, dict]:
     requirements = skill / "runtime/requirements.txt"
     if not requirements.is_file():
@@ -41,10 +61,15 @@ def prepare_runtime(job: Path, skill: Path) -> tuple[Path, dict]:
     runtime_dir.mkdir(parents=True, exist_ok=True)
     venv = runtime_dir / "venv"
     python = _venv_python(venv)
-    if not python.exists():
-        _run([sys.executable, "-m", "venv", str(venv)])
-    if not python.exists():
-        raise RuntimeError(f"Virtual environment did not provide {python}")
+    rebuilt = False
+    if not _venv_ready(python):
+        command = [sys.executable, "-m", "venv"]
+        if venv.exists():
+            command.append("--clear")
+        _run([*command, str(venv)])
+        rebuilt = True
+    if not _venv_ready(python):
+        raise RuntimeError(f"Virtual environment did not provide a pip-enabled Python: {python}")
 
     state_path = runtime_dir / "bootstrap-state.json"
     wanted = _digest(requirements)
@@ -53,7 +78,7 @@ def prepare_runtime(job: Path, skill: Path) -> tuple[Path, dict]:
         prior = json.loads(state_path.read_text(encoding="utf-8"))
     except Exception:
         pass
-    install_needed = prior.get("requirements_sha256") != wanted
+    install_needed = rebuilt or prior.get("requirements_sha256") != wanted
     if not install_needed:
         probe = subprocess.run(
             [str(python), "-c", "import websockets,jsonschema,psutil"],
@@ -69,7 +94,7 @@ def prepare_runtime(job: Path, skill: Path) -> tuple[Path, dict]:
 
     state = {
         "schema_version": 1,
-        "python": str(python.resolve()),
+        "python": str(python.absolute()),
         "base_python": sys.executable,
         "requirements": str(requirements.resolve()),
         "requirements_sha256": wanted,

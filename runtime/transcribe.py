@@ -13,6 +13,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from transcription_runtime import ensure_transcription_runtime
+
 
 def stamp(seconds: float, srt=True):
     ms = max(0, round(float(seconds) * 1000))
@@ -73,6 +75,11 @@ def main():
     ap.add_argument("--compute-type", default="default")
     ap.add_argument("--backend", choices=["auto", "faster-whisper", "whisper-cli"], default="auto")
     ns = ap.parse_args()
+    if ns.backend in {"auto", "faster-whisper"}:
+        dependency = ensure_transcription_runtime(Path(__file__).resolve().parents[1])
+        if not dependency.get("ok"):
+            detail = dependency.get("error") or dependency.get("stderr") or "unknown installation error"
+            raise SystemExit(f"Could not provision local transcription runtime: {detail}")
     media = Path(ns.media).resolve(); out = Path(ns.out_dir).resolve(); out.mkdir(parents=True, exist_ok=True)
 
     errors = []

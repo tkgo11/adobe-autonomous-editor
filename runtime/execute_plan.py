@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import errno
-import importlib.util
 import json
 import subprocess
 import sys
@@ -26,26 +25,7 @@ from desktop_driver import run_steps
 from platform_support import launch_application, upia_install_command
 from rpc_client import call as ws_call
 from toolchain import restore_media_path
-
-
-def ensure_transcription_runtime(skill: Path) -> dict:
-    """Install optional speech dependencies into the isolated job runtime."""
-    if importlib.util.find_spec("faster_whisper") is not None:
-        return {"ok": True, "installed": False}
-    requirements = skill / "runtime/requirements-ml.txt"
-    if not requirements.is_file():
-        return {"ok": False, "error": f"missing {requirements}"}
-    run = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "--requirement", str(requirements)],
-        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=1800,
-    )
-    return {
-        "ok": run.returncode == 0 and importlib.util.find_spec("faster_whisper") is not None,
-        "installed": run.returncode == 0,
-        "returncode": run.returncode,
-        "stdout": run.stdout[-8000:],
-        "stderr": run.stderr[-8000:],
-    }
+from transcription_runtime import ensure_transcription_runtime
 
 
 def minimal_plan_check(plan):

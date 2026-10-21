@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import json
 import os
 import plistlib
@@ -118,7 +120,7 @@ def main():
     # --- In-process unit checks (stdlib-only modules; no Adobe host required) ---
     sys.path.insert(0, str(ROOT / "runtime"))
     sys.path.insert(0, str(ROOT / "scripts"))
-    import ae_rpc, analyze_media, bootstrap, broker_util, crafting_apps, desktop_driver, initialize as initializer, platform_support, qc, source_inventory, toolchain  # noqa: E402
+    import ae_rpc, analyze_media, bootstrap, broker_util, crafting_apps, desktop_driver, initialize as initializer, platform_support, qc, source_inventory, toolchain, transcribe  # noqa: E402
 
     check((ROOT / "scripts/provision_python.ps1").exists(), "Windows Python self-provisioner missing")
     check((ROOT / "scripts/provision_python.sh").exists(), "Unix Python self-provisioner missing")
@@ -257,6 +259,47 @@ def main():
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         check(python_probe.returncode == 0 and python_probe.stdout.strip() == str(managed_python), "Python without working venv support was accepted")
+
+        # An interrupted venv may have a Python executable but no pip. A
+        # retry must rebuild it before treating the job as initialized.
+        partial_job = td / "partial-venv-job"
+        partial_skill = td / "partial-venv-skill"
+        (partial_skill / "runtime").mkdir(parents=True)
+        (partial_skill / "runtime/requirements.txt").write_text("", encoding="utf-8")
+        partial_venv = partial_job / "runtime/venv"
+        subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(partial_venv)], check=True)
+        check(not bootstrap._venv_ready(bootstrap._venv_python(partial_venv)), "pip-free partial venv was accepted")
+        repaired_python, repaired_state = bootstrap.prepare_runtime(partial_job, partial_skill)
+        check(bootstrap._venv_ready(repaired_python), "bootstrap did not repair an interrupted venv")
+        check(repaired_state["python"] == str(repaired_python), "bootstrap recorded the base interpreter instead of the job venv")
+
+        # The standalone transcription entry point must provision the optional
+        # backend on auto, while an explicit whisper CLI must bypass it.
+        media = td / "speech.wav"
+        media.write_bytes(b"")
+        previous_argv = sys.argv
+        previous_ensure = transcribe.ensure_transcription_runtime
+        previous_faster = transcribe.faster_whisper
+        previous_cli = transcribe.whisper_cli
+        provisioned = []
+        try:
+            transcribe.ensure_transcription_runtime = lambda skill: provisioned.append(skill) or {"ok": True}
+            transcribe.faster_whisper = lambda *args: {"backend": "faster-whisper", "language": "en", "language_probability": 1.0, "segments": [{"start": 0, "end": 1, "text": "hello"}]}
+            sys.argv = ["transcribe.py", str(media), "--out-dir", str(td / "auto-transcript")]
+            with contextlib.redirect_stdout(io.StringIO()):
+                transcribe.main()
+            check(provisioned == [ROOT] and (td / "auto-transcript/transcript.json").exists(), "standalone auto transcription skipped dependency provisioning")
+            transcribe.ensure_transcription_runtime = lambda skill: (_ for _ in ()).throw(AssertionError("whisper-cli attempted ML provisioning"))
+            transcribe.whisper_cli = lambda *args: {"backend": "whisper-cli", "language": "en", "segments": [{"start": 0, "end": 1, "text": "hello"}]}
+            sys.argv = ["transcribe.py", str(media), "--out-dir", str(td / "cli-transcript"), "--backend", "whisper-cli"]
+            with contextlib.redirect_stdout(io.StringIO()):
+                transcribe.main()
+            check((td / "cli-transcript/transcript.json").exists(), "standalone whisper-cli transcription failed")
+        finally:
+            sys.argv = previous_argv
+            transcribe.ensure_transcription_runtime = previous_ensure
+            transcribe.faster_whisper = previous_faster
+            transcribe.whisper_cli = previous_cli
 
         # macOS Adobe application bundles and UPIA are discovered without
         # relying on Windows-only executable names.
