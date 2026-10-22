@@ -16,7 +16,7 @@ jobs:
           python-version: "3.11"
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
       - name: Install runtime dependencies
         run: pip install -r runtime/requirements.txt
       - name: Run package self-test
