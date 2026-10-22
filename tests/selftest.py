@@ -147,6 +147,11 @@ def main():
         "see https://example.com/watch?v=abc&token=private")), "signed URL leaked in error text")
     check(stock_assets.allowed_host("pexels", "vod-progressive.akamaized.net"), "Pexels video CDN was rejected")
     check(stock_assets.allowed_host("shutterstock", "download1.shutterstock.com"), "Shutterstock video CDN was rejected")
+    with patch.dict("os.environ", {"PEXELS_API_KEY": "test-token"}), \
+         patch.object(stock_assets, "get_json", return_value={"videos": []}) as pexels_search:
+        stock_assets.search_pexels("city at dusk", "video")
+    check(pexels_search.call_args.args[0].startswith("https://api.pexels.com/videos/search?"),
+          "Pexels video search used an invalid API route")
     prior_failure = {"paths": [], "rights": {"source_url": "https://example.com/clip", "asset_origin": "user_url", "error": "timeout"}}
     retried_success = {"paths": ["/job/source/downloads/clip.mp4"], "rights": {"source_url": "https://example.com/clip", "asset_origin": "user_url"}}
     merged_records = initialize.merge_rights_records([prior_failure], [retried_success])
@@ -360,6 +365,10 @@ def main():
 
             # initialize.py end-to-end: no readable sources -> BLOCKED contract artifacts.
             job = td / "job"
+            (job / "analysis").mkdir(parents=True)
+            (job / "analysis/asset_rights.json").write_text(json.dumps({"assets": [
+                {"paths": [], "rights": asset_download.rights_record("https://example.com/withdrawn.mp4")}
+            ]}))
             r = subprocess.run(
                 [sys.executable, str(ROOT / "runtime/initialize.py"), "--job-root", str(job),
                  "--skill-root", str(ROOT), "--brief", "selftest", "--source", str(td / "missing.mov")],
@@ -372,6 +381,8 @@ def main():
                           "degraded_capabilities", "blockers", "notes"):
                 check(field in init, f"init_state missing documented field {field}")
             check(init["status"] == "BLOCKED" and init["blockers"], "init_state should be BLOCKED with blockers")
+            check(json.loads((job / "analysis/asset_rights.json").read_text())["assets"] == [],
+                  "removing the last URL source did not clear stale rights records")
             check((job / "logs/initialize.log").stat().st_size > 0, "initialize.log not written")
             check(list((job / "recovery/init-history").glob("init-*.json")), "init history snapshot missing")
 

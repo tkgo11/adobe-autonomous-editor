@@ -57,8 +57,8 @@ def search_pexels(query: str, media_type: str) -> list[dict]:
     key = os.getenv("PEXELS_API_KEY")
     if not key:
         return []
-    endpoint = "videos/search" if media_type == "video" else "search"
-    data = get_json(f"https://api.pexels.com/v1/{endpoint}?{urlencode({'query': query, 'per_page': 5})}",
+    endpoint = "https://api.pexels.com/videos/search" if media_type == "video" else "https://api.pexels.com/v1/search"
+    data = get_json(f"{endpoint}?{urlencode({'query': query, 'per_page': 5})}",
                     {"Authorization": key})
     found = []
     for item in data.get("videos" if media_type == "video" else "photos", []):

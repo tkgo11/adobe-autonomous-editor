@@ -254,8 +254,9 @@ def main():
             if path.is_file() and path.resolve().is_relative_to(downloads_root):
                 resolved_sources.append(str(path))
     resolved_sources = list(dict.fromkeys(resolved_sources))
-    if rights_records:
-        write_rights_report(job, rights_records)
+    # Always refresh reports so removing the last URL source clears stale rights
+    # metadata that a later stock acquisition might otherwise reload.
+    write_rights_report(job, rights_records)
     if resolved_sources:
         inv_cmd = [sys.executable, str(skill / "runtime/source_inventory.py"), *resolved_sources, "--out", str(inventory_path)]
         p = subprocess.run(inv_cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
