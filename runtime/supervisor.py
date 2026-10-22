@@ -11,13 +11,11 @@ import argparse
 import asyncio
 import json
 import os
-import platform
-import subprocess
-import sys
 import time
 from pathlib import Path
 
 from broker_util import read_json, start_broker
+from platform_support import launch_application
 from rpc_client import call
 
 
@@ -31,7 +29,7 @@ def launch_premiere(exe: str | None):
     if not exe or not Path(exe).exists():
         return False, "Premiere executable unavailable"
     try:
-        subprocess.Popen([exe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        launch_application(exe)
         return True, None
     except Exception as exc:
         return False, str(exc)
@@ -98,7 +96,7 @@ def main():
         broker_ok = bool(broker.get("ok"))
         if not broker_ok:
             if broker_restarts < ns.max_restarts:
-                proc = start_broker(skill, job)
+                proc = start_broker(skill, job, control_uri=ns.control_uri)
                 broker_restarts += 1
                 emit({"ts": now, "event": "broker_restart", "pid": proc.pid, "attempt": broker_restarts})
                 time.sleep(min(1.5, ns.interval))

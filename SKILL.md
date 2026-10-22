@@ -1,13 +1,15 @@
 ---
 name: adobe-autonomous-editor
-description: Fully autonomous AI video-editing director and execution skill for Adobe Premiere Pro and After Effects. Use when the user supplies footage/assets plus creative requirements and expects a finished edit with no manual timeline work. The agent must plan, edit, create motion graphics/VFX, mix audio, caption, color, render, inspect the output, repair defects, and deliver final exports plus editable Adobe projects. Prefer programmable control, but escalate through every available control surface—including Premiere UXP/Hybrid plugins, After Effects ExtendScript/expressions, Adobe rendering interfaces, legacy Premiere scripting/QE when unavoidable, OS accessibility automation, keyboard/mouse automation, and computer-use vision—rather than declaring a requested edit impossible merely because a high-level API lacks a method.
+description: Fully autonomous AI video-editing director and execution skill. Use the video-related Crafting Apps CLIs first—FilmCraft for editing and EffectCraft for motion graphics/VFX—and fall back to Adobe Premiere Pro and After Effects only when the required feature is unavailable or a verified Crafting Apps attempt fails. Installs/probes the CLIs, plans, edits, mixes, captions, colors, renders, verifies, repairs, and delivers final exports plus editable projects with no manual timeline work.
 ---
 
-# Adobe Autonomous Editor
+# Autonomous Video Editor — Crafting Apps first, Adobe fallback
 
 ## Mission
 
-Turn **footage/assets + a natural-language brief** into a finished, editable Adobe Premiere Pro / After Effects production with minimal or zero user intervention.
+Turn **footage/assets + a natural-language brief** into a finished, editable video production with minimal or zero user intervention.
+
+The default editor policy is `crafting-first`: use the command-line versions of **FilmCraft** and **EffectCraft** from the [Crafting Apps catalog](https://getartcraft.com/apps). Do not use unrelated Crafting Apps. Use Adobe Premiere Pro or After Effects only for an operation whose required capability is absent, broken, or fails verification in the matching Crafting App.
 
 The user is the client, not the operator. Do not ask the user to perform timeline edits, click menus, install routine dependencies manually, choose codecs, select tracks, create compositions, tune effect values, troubleshoot panels, or review intermediate technical states unless an external permission/license/credential decision truly cannot be made safely without them.
 
@@ -23,12 +25,12 @@ Given:
 the agent shall autonomously:
 
 1. invoke the mandatory internal initializer at `skills/initialize/SKILL.md`;
-2. inventory/fingerprint sources and establish tested Adobe/tool capabilities through that initializer;
+2. inventory/fingerprint sources, install missing FilmCraft/EffectCraft CLIs when permitted, and establish tested Crafting Apps capabilities plus discoverable Adobe fallback surfaces through that initializer;
 3. infer delivery format when not specified;
 4. analyze dialogue, scenes, subjects, motion, shot quality, music, graphics needs, continuity, pacing, and technical defects;
 5. translate the brief into an explicit edit specification;
 6. choose the most reliable tested control surface for each operation;
-7. create or update Premiere and After Effects projects;
+7. create or update FilmCraft/EffectCraft projects, using Premiere/After Effects projects only for fallback operations;
 8. render previews as needed;
 9. inspect visual and audio results;
 10. diagnose mismatches or defects;
@@ -46,13 +48,14 @@ The root skill orchestrates internal sub-skills declared in `skills/manifest.jso
 
 ## 0.1 Mandatory initialize skill
 
-Before workflow routing, creative analysis, Premiere timeline mutation, or After Effects production work, **load and execute `skills/initialize/SKILL.md`**.
+Before workflow routing, creative analysis, or editor mutation, **load and execute `skills/initialize/SKILL.md`**.
 
 The initialize skill owns:
 
 - job workspace creation/resume;
 - non-destructive source inventory and technical fingerprinting;
 - OS/hardware/tool discovery;
+- official FilmCraft/EffectCraft CLI discovery, checksum-verified installation, and executable probing;
 - Premiere/After Effects/AME binary and version discovery;
 - Premiere UXP/bridge/legacy/UI fallback probing;
 - After Effects JSX/`aerender` probing;
@@ -68,7 +71,7 @@ Proceed on `READY` or `DEGRADED`. On `DEGRADED`, use the tested fallback paths r
 
 ## 0.2 Targeted re-initialization
 
-Reinvoke `skills/initialize/SKILL.md` in targeted refresh mode when Adobe restarts/updates, a bridge repeatedly disconnects, a capability probe proves wrong, a previously untested control surface becomes necessary, the machine/environment changes, or a crashed job is resumed.
+Reinvoke `skills/initialize/SKILL.md` in targeted refresh mode when a Crafting App or Adobe host restarts/updates, a bridge repeatedly disconnects, a capability probe proves wrong, a previously untested control surface becomes necessary, the machine/environment changes, or a crashed job is resumed.
 
 A refresh should preserve creative/job state and retest only stale or affected capabilities when possible.
 
@@ -77,11 +80,12 @@ A refresh should preserve creative/job state and retest only stale or affected c
 This skill ships a real local control plane under `runtime/`; do not treat the skill as prompt-only documentation. Prefer these implementations before inventing new adapters:
 
 - `runtime/initialize.py` — executable preflight and capability state writer.
+- `runtime/crafting_apps.py` — official FilmCraft/EffectCraft CLI discovery, verified release installation, probing, and invocation.
 - `runtime/orchestrator.py` — authenticated loopback broker. Premiere UXP connects as a WebSocket client on port 8765; controllers connect on 8766.
 - `runtime/rpc_client.py` — direct Premiere RPC client.
 - `templates/premiere-uxp/` — installable UXP bridge with explicit handlers for project, sequence, timeline, effects, transitions, MOGRT, AE-comp import and export operations.
-- `runtime/ae_rpc.py` — explicit AE action-plan compiler/dispatcher using generated JSX and `AfterFX.exe -r`.
-- `runtime/desktop_driver.py` — Windows UI Automation + keyboard/mouse + screenshot fallback.
+- `runtime/ae_rpc.py` — explicit AE action-plan compiler/dispatcher using generated JSX and the platform After Effects executable's `-r` mode.
+- `runtime/desktop_driver.py` — Windows UI Automation or macOS Accessibility + keyboard/mouse + screenshot fallback.
 - `runtime/analyze_media.py` — deterministic scene/silence/metadata analysis for edit planning.
 - `runtime/transcribe.py` — optional local timestamped STT producing JSON/SRT/VTT.
 - `runtime/execute_plan.py` — mixed-engine action-plan executor with bounded retries, verification actions, and ordered per-operation fallbacks.
@@ -91,9 +95,9 @@ This skill ships a real local control plane under `runtime/`; do not treat the s
 
 The bridge secret is machine-local and reusable across jobs. The network bridge must remain loopback-only. Never expose arbitrary `eval`/JSX execution over the socket.
 
-When the bundled command registry lacks a newly exposed Adobe operation, add the smallest explicit handler, self-test it, then cache it. When Adobe exposes no programmable operation, fall through to UIA/vision rather than pretending an API exists.
+When the bundled command registry lacks a newly exposed Adobe operation, add the smallest explicit handler, self-test it, then cache it. When Adobe exposes no programmable operation, fall through to Windows UIA or macOS Accessibility/vision rather than pretending an API exists.
 
-Bundled executable coverage is **UXP + AE JSX + UIA/keyboard/mouse + render/QC**. CEP/QE and Hybrid C++ are compatibility/performance tiers generated or attached only when a concrete job requires them. Do not mark those tiers available until an installed-host feature probe succeeds.
+Bundled executable coverage is **FilmCraft CLI + EffectCraft CLI + UXP + AE JSX + UIA/keyboard/mouse + render/QC**. CEP/QE and Hybrid C++ are compatibility/performance tiers generated or attached only when a concrete job requires them. Do not mark those tiers available until an installed-host feature probe succeeds.
 
 ---
 
@@ -120,7 +124,7 @@ Otherwise choose a sensible default and continue.
 - Work in a dedicated job directory.
 - Copy or duplicate project files before risky changes.
 - Version sequences/comps before structural rewrites.
-- Prefer non-destructive Adobe effects, adjustment layers, nests, precomps, masks, and keyframes.
+- Prefer non-destructive editor effects, adjustment layers, nests/precomps, masks, and keyframes.
 - Never directly hex-edit or reverse-engineer `.prproj`/`.aep` project files as the primary automation path.
 - Preserve source media untouched.
 
@@ -128,13 +132,14 @@ Otherwise choose a sensible default and continue.
 
 If a requested operation is not exposed by the current API:
 
-1. try another supported Adobe API/control surface;
-2. try an Adobe scripting path;
-3. try a documented/known legacy scripting path when compatibility warrants it;
-4. try OS accessibility/UI Automation;
-5. try keyboard/mouse automation using deterministic coordinates anchored by detected UI elements;
-6. use vision-based Computer Use as the last resort;
-7. verify the result visually and retry if necessary.
+1. try the matching FilmCraft or EffectCraft CLI command discovered from its command catalog;
+2. if the capability is unavailable or the result fails verification, record the reason and route that operation to Premiere or After Effects;
+3. try another supported Adobe API/control surface;
+4. try an Adobe scripting or documented legacy path when compatibility warrants it;
+5. try OS accessibility/UI Automation;
+6. try keyboard/mouse automation using deterministic coordinates anchored by detected UI elements;
+7. use vision-based Computer Use as the last resort;
+8. verify the result visually and retry if necessary.
 
 Do not respond “not possible through the API” when the UI itself can perform the operation.
 
@@ -142,7 +147,7 @@ Do not respond “not possible through the API” when the UI itself can perform
 
 After every major edit phase, verify state using at least one independent mechanism:
 
-- query Adobe DOM/project state;
+- query the Crafting App or Adobe project state;
 - inspect exported XML/metadata where appropriate;
 - render a low-resolution preview and inspect frames;
 - inspect waveform/loudness/silence;
@@ -156,6 +161,18 @@ For UI fallbacks, verification is mandatory after **every** operation batch.
 # 2. Control-surface hierarchy
 
 Use the highest reliable layer that can perform the task. Mix layers inside one job.
+
+## Primary A — FilmCraft CLI
+
+Use `filmcraft-cli` first for nonlinear editing, media organization, timeline assembly and trims, captions, color, audio, interchange, and delivery. Discover commands with `filmcraft-cli commands --json`, inspect projects/sequences as JSON, use `--save` or `--save-as` explicitly for mutations, and render or export through the CLI. Preserve `.fcproj` as the editable primary project when FilmCraft is used.
+
+## Primary B — EffectCraft CLI
+
+Use `effectcraft-cli` first for motion graphics, compositing, animation, effects, tracking/roto, and render-queue work. Discover schemas with `effectcraft-cli exec --list --schemas --json`, mutate `.ecproj` files with explicit save flags, and inspect/render frames after changes. Preserve `.ecproj` as the editable primary project when EffectCraft is used.
+
+Every eligible execution-plan operation must name the matching Crafting App engine as its primary action and place Adobe actions under ordered `fallbacks`. Do not preemptively choose Adobe because it is installed or familiar. A fallback is justified only by a missing command/capability, a CLI failure, an unsupported source/delivery constraint, or failed independent verification, and the execution report must retain that evidence.
+
+## Adobe fallback tiers
 
 ## Tier A — External analysis and deterministic media tooling
 
@@ -273,9 +290,9 @@ Rules:
 
 Typical legacy-only/fragile areas may include certain transitions, sequence settings, or effect-control paths depending on Premiere version.
 
-## Tier G — Windows UI Automation / accessibility
+## Tier G — Desktop accessibility automation
 
-When Adobe exposes the feature only through UI, automate it through Windows accessibility/UIA before using raw pixel clicks.
+When Adobe exposes the feature only through UI, use Windows accessibility/UIA or macOS System Events Accessibility before raw pixel clicks.
 
 Preferred tools, if available:
 
@@ -283,6 +300,8 @@ Preferred tools, if available:
 - Windows UI Automation APIs;
 - PowerShell/.NET UI Automation;
 - AutoHotkey v2 for stable keyboard-driven flows.
+- macOS System Events/AX accessibility;
+- macOS CoreGraphics input and `screencapture`.
 
 Strategy:
 
@@ -443,7 +462,7 @@ Example event:
 }
 ```
 
-## 3.6 Phase 4 — Adobe execution
+## 3.6 Phase 4 — Crafting Apps-first execution
 
 Build the edit using the control-surface hierarchy in Section 2.
 
@@ -452,12 +471,13 @@ Universal execution rules:
 - organize source media deterministically;
 - version projects/sequences/comps before structural rewrites;
 - keep track/layer naming predictable;
-- prefer Premiere for editorial assembly and AE for composition-heavy work;
-- use module-specific Premiere/AE rules from the loaded workflow files;
+- prefer FilmCraft for editorial assembly and EffectCraft for composition-heavy work;
+- use Premiere and After Effects only as per-operation fallbacks;
+- use module-specific editorial/compositing rules from the loaded workflow files;
 - keep graphics/VFX editable when practical;
 - render previews after major structural or visual phases.
 
-Recommended Premiere track roles when applicable:
+Recommended timeline track roles when applicable:
 
 - V1 PRIMARY
 - V2 BROLL
@@ -480,7 +500,7 @@ Universal finishing constraints:
 - avoid double LUT/color transforms;
 - verify caption timing against the **final** edited sequence;
 - avoid graphics collisions with faces, UI, safe areas, or mandatory text;
-- route complex composition/tracking/kinetic-graphics work to After Effects when it is the more reliable surface.
+- route complex composition/tracking/kinetic-graphics work to EffectCraft first, then After Effects when EffectCraft lacks or fails the required surface.
 
 ## 3.8 Phase 6 — Preview render and AI review
 
@@ -537,8 +557,8 @@ Deliver as applicable:
 
 - final master export;
 - platform/aspect/language variants;
-- `.prproj` project;
-- `.aep` project(s) when used;
+- `.fcproj` and `.ecproj` editable projects when used;
+- `.prproj` and `.aep` fallback projects when used;
 - collected/generated assets where licensing permits;
 - `execution_report.md`;
 - `edit_spec.json`;
@@ -555,19 +575,19 @@ Use this as the default dispatcher, but feature-detect at runtime.
 
 | Task | Primary | Secondary | Last resort |
 |---|---|---|---|
-| Import/bin organization | Premiere UXP | CEP/ExtendScript | UIA/Computer Use |
-| Timeline assembly/trims | Premiere UXP | legacy DOM/QE if needed | UIA/Computer Use |
-| Effects | Premiere UXP | QE / AE | UIA/Computer Use |
-| Transitions | Premiere UXP if current API supports requested control | QE/AE custom transition | UIA/Computer Use |
-| Sequence settings | UXP/preset APIs | preset generation / legacy adapter | UIA/Computer Use |
-| Captions | Premiere UXP/current APIs | generated caption assets/legacy adapter | UIA/Computer Use |
-| Lumetri/color | Premiere UXP where exposed | effect-property adapter | UIA/Computer Use |
-| Motion graphics | After Effects JSX/expressions | Premiere graphics APIs | UIA/Computer Use |
-| Complex compositing | After Effects JSX | AE UI automation | Computer Use |
-| Tracking/roto interactive-only step | AE scripting where available | UIA | Computer Use |
-| Audio automation | Premiere UXP | external analysis + parameter application | UIA/Computer Use |
-| Render AE | aerender | AE render queue UI | Computer Use |
-| Export Premiere | Premiere UXP export | AME workflow | UIA/Computer Use |
+| Import/bin organization | FilmCraft CLI | Premiere UXP | UIA/Computer Use |
+| Timeline assembly/trims | FilmCraft CLI | Premiere UXP / legacy DOM | UIA/Computer Use |
+| Effects | FilmCraft CLI | Premiere UXP / AE | UIA/Computer Use |
+| Transitions | FilmCraft CLI | Premiere UXP / AE custom transition | UIA/Computer Use |
+| Sequence settings | FilmCraft CLI | Premiere UXP/preset APIs | UIA/Computer Use |
+| Captions | FilmCraft CLI | Premiere UXP/current APIs | UIA/Computer Use |
+| Color | FilmCraft CLI | Premiere Lumetri/effect adapter | UIA/Computer Use |
+| Motion graphics | EffectCraft CLI | After Effects JSX/expressions | UIA/Computer Use |
+| Complex compositing | EffectCraft CLI | After Effects JSX | Computer Use |
+| Tracking/roto | EffectCraft CLI | AE scripting/UIA | Computer Use |
+| Audio automation | FilmCraft CLI | Premiere UXP | UIA/Computer Use |
+| Motion/VFX render | EffectCraft CLI | aerender / AE render queue | Computer Use |
+| Editorial export | FilmCraft CLI | Premiere UXP / AME | UIA/Computer Use |
 | Unsupported plugin panel | plugin API if documented | UIA | Computer Use |
 | Native/ML processing | UXP Hybrid C++ | external process | n/a |
 
@@ -581,8 +601,8 @@ The agent is allowed to build missing automation infrastructure inside the job/t
 
 When a capability is missing:
 
-1. inspect the installed Adobe version;
-2. consult current official Adobe developer documentation/samples when internet access is available;
+1. inspect the FilmCraft/EffectCraft command catalog and installed versions, then the Adobe versions if fallback is required;
+2. consult current official Crafting Apps or Adobe documentation/samples when internet access is available;
 3. generate the smallest adapter/plugin/script needed;
 4. install/load it using an automated method when possible;
 5. if installation requires GUI interaction, automate the installation with UIA/Computer Use;
@@ -717,8 +737,9 @@ Do not declare completion merely because an export exists.
 A job is complete only when all applicable checks pass:
 
 - [ ] source media remains intact;
-- [ ] editable Premiere project saved;
-- [ ] editable AE projects saved when used;
+- [ ] editable FilmCraft project saved when FilmCraft was used;
+- [ ] editable EffectCraft project saved when EffectCraft was used;
+- [ ] editable Premiere/AE fallback projects saved when used;
 - [ ] no offline media in final sequence;
 - [ ] explicit brief requirements mapped to evidence;
 - [ ] final export decodes successfully;
@@ -742,14 +763,14 @@ When this skill is invoked:
 
 1. Read the footage/assets and user brief.
 2. **Do not answer with an editing tutorial.** Begin execution.
-3. Execute `skills/initialize/SKILL.md` through `runtime/initialize.py --auto` (or the default-auto `scripts/initialize_job.ps1` on Windows), including bridge package/update, broker start/reuse, Premiere launch, and capability probing when permitted.
-4. Consume `plans/capability_matrix.json`; if Premiere UXP is installed but not connected, launch Premiere and autonomously open/reload the bridge using UIA/vision before downgrading.
+3. Execute `skills/initialize/SKILL.md` through `scripts/initialize_job.ps1` on Windows or `scripts/initialize_job.sh` on macOS/Linux; both reach the standard-library `runtime/bootstrap.py` entry point with `--auto --editor-priority crafting-first`. It must provision Python/runtime packages and ffmpeg/ffprobe, install/probe checksum-verified FilmCraft/EffectCraft CLIs, and prepare platform-available Adobe fallback surfaces. Do not invoke `runtime/initialize.py` directly on an unprepared machine.
+4. Consume `plans/capability_matrix.json`; use FilmCraft/EffectCraft capabilities first. Launch or repair an Adobe surface only when a required Crafting Apps capability is absent, failed, or unverifiable.
 5. Read `workflows/manifest.json` and select/load only relevant workflow modules.
-6. Analyze media once with `runtime/analyze_media.py`; when speech matters, run local `runtime/transcribe.py` (install optional ML dependencies automatically when permitted), then share analysis/transcript across modules and deliverables.
+6. Run later Python commands through `scripts/run_runtime.sh` on macOS/Linux (`<job> <skill> <command> <args...>`) or `scripts/run_runtime.ps1` on Windows (`-JobRoot <job> -SkillRoot <skill> -Command <command> -Arguments <args...>`) so they use the job's provisioned virtual environment. Analyze media once with the `analyze_media` command; when speech matters, use `transcribe` (which installs optional ML dependencies automatically when permitted), then share analysis/transcript across modules and deliverables.
 7. Write the modular edit spec and a machine-readable execution plan. Encode fragile operations with `retries`, an independent `verify` action, and ordered `fallbacks` so a single API gap does not stop the job.
-8. Start `runtime/supervisor.py` for long unattended jobs, then execute using `runtime/execute_plan.py`, preferring Premiere UXP and AE JSX while allowing per-operation UI fallbacks.
+8. Execute using the `execute_plan` command with `filmcraft`/`effectcraft` primary actions and Premiere/After Effects ordered fallbacks. Start the `supervisor` command only when Adobe fallback work is active for a long unattended job.
 9. Render a review version.
-10. Generate `runtime/review_packet.py` evidence and inspect it multimodally.
+10. Generate `review_packet` evidence and inspect it multimodally.
 11. Repair against universal + module-specific QC gates and rerender until thresholds pass or a truthful external blocker is reached.
 12. Render final deliverables and run objective QC.
 13. Return concise paths/results and summarize assumptions or substitutions.
@@ -763,7 +784,11 @@ The user should never need to know which control tier was used unless something 
 Use the accompanying files as building blocks:
 
 - `scripts/setup_runtime.ps1` — job-local Python environment/dependency bootstrap.
+- `scripts/provision_python.ps1` — signed, per-job Windows Python bootstrap when Python is absent.
 - `scripts/initialize_job.ps1` — Windows wrapper for executable initialization.
+- `scripts/provision_python.sh` — checksum-verified `uv`/Python bootstrap for macOS and Linux.
+- `scripts/initialize_job.sh` — macOS/Linux wrapper for executable initialization.
+- `scripts/run_runtime.ps1` / `scripts/run_runtime.sh` — run analysis, execution, review, QC, and other follow-on commands with the initialized job's Python environment.
 - `scripts/install_premiere_bridge.ps1` — Adobe UPIA `.ccx` install helper.
 - `scripts/start_orchestrator.ps1` — background loopback broker launcher.
 - `scripts/ae_dispatch.ps1` — low-level JSX launcher retained for one-off scripts.
@@ -771,7 +796,9 @@ Use the accompanying files as building blocks:
 - `scripts/route_workflow.py` — deterministic fallback workflow router; semantic routing remains authoritative.
 - `runtime/orchestrator.py` / `runtime/rpc_client.py` — Premiere RPC transport.
 - `runtime/package_bridge.py` — authenticated Premiere bridge packager.
-- `runtime/initialize.py` / `runtime/source_inventory.py` — concrete initializer implementation.
+- `runtime/bootstrap.py` / `runtime/initialize.py` / `runtime/source_inventory.py` — self-provisioning initializer implementation.
+- `runtime/toolchain.py` — local ffmpeg/ffprobe provisioning and discovery.
+- `runtime/platform_support.py` — cross-platform Adobe discovery, versioning, bridge install, and launch helpers.
 - `runtime/ae_rpc.py` — AE action DSL to generated JSX.
 - `runtime/desktop_driver.py` — deterministic UI fallback and observation surface.
 - `runtime/execute_plan.py` — cross-surface execution engine.

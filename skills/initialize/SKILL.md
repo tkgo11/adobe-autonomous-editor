@@ -1,15 +1,15 @@
 ---
 name: adobe-autonomous-editor-initialize
-description: Internal bootstrap skill for Adobe Autonomous Editor. Run before any editing workflow. It creates or resumes the job workspace, inventories source media without modifying it, discovers Adobe applications and versions, detects available automation/control surfaces, prepares and self-tests Premiere/After Effects bridges and local tooling, writes a capability matrix and initialization state, and returns READY, DEGRADED, or BLOCKED without performing creative edits.
+description: Internal bootstrap skill for the autonomous video editor. Run before any editing workflow. It creates or resumes the job workspace, inventories source media without modifying it, discovers and optionally installs the FilmCraft and EffectCraft CLIs, probes their capabilities first, prepares Adobe Premiere/After Effects fallback surfaces, writes a capability matrix and initialization state, and returns READY, DEGRADED, or BLOCKED without performing creative edits.
 ---
 
-# Adobe Autonomous Editor — Initialize
+# Autonomous Video Editor — Initialize
 
 ## Role
 
 This is an **internal prerequisite skill** for `adobe-autonomous-editor`.
 
-Run it **once at the start of every job** and again whenever the execution environment materially changes (Adobe restart/update, plugin/bridge failure, machine change, dependency change, project recovery, or a capability previously marked unavailable becomes necessary).
+Run it **once at the start of every job** and again whenever the execution environment materially changes (Crafting App or Adobe restart/update, plugin/bridge failure, machine change, dependency change, project recovery, or a capability previously marked unavailable becomes necessary).
 
 The initializer prepares the environment. It does **not** make creative editorial decisions and does **not** modify source footage.
 
@@ -50,7 +50,7 @@ Editing can proceed safely, but one or more preferred control surfaces are unava
 A true external blocker prevents safe execution and no valid fallback exists, for example:
 
 - required source path cannot be accessed;
-- no usable Premiere/After Effects installation exists for a requirement that specifically needs it;
+- no usable FilmCraft/EffectCraft CLI or Adobe fallback exists for a required operation;
 - Adobe sign-in/license activation blocks launch and cannot be resolved without user action;
 - required paid/licensed third-party component is absent and cannot be reproduced with native tools;
 - OS permission blocks all viable control paths.
@@ -74,7 +74,7 @@ Running initialization repeatedly against the same job must be safe.
 
 - Never modify original footage/assets.
 - Hash or fingerprint sources read-only.
-- Never overwrite the only Adobe project copy.
+- Never overwrite the only editor project copy.
 - Perform bridge/API self-tests in a disposable sandbox project, not the user's production project.
 
 ## 1.3 Autonomous by default
@@ -85,7 +85,8 @@ Automatically handle when permitted by the host environment:
 
 - directory creation;
 - local Python package installation into an isolated environment;
-- locating ffmpeg/ffprobe;
+- locating or installing ffmpeg/ffprobe into machine-local state and verifying both executables;
+- locating and, under `crafting-first`, installing official FilmCraft/EffectCraft CLI releases with published checksum verification;
 - locating Adobe binaries;
 - generating adapters/plugins/scripts;
 - loading or installing the local Premiere bridge when installation does not require a purchase or unknown credential;
@@ -96,7 +97,7 @@ Only escalate to the user for credentials, licensing/purchase, privacy-sensitive
 
 ## 1.4 Capability truth over assumptions
 
-Never assume a feature exists because a specific Adobe version is expected to expose it.
+Never assume a feature exists because a specific Crafting App or Adobe version is expected to expose it.
 
 Feature-detect and self-test the actual installed host.
 
@@ -128,6 +129,8 @@ Create or verify:
   analysis/
   plans/
   projects/
+    filmcraft/
+    effectcraft/
     premiere/
     after-effects/
   assets/
@@ -242,7 +245,29 @@ For a missing routine dependency needed by this skill:
 
 Do not silently install paid software, accept licenses on the user's behalf, bypass activation, or disable security controls.
 
+Use `runtime/bootstrap.py` as the normal entry point. On Windows, `scripts/initialize_job.ps1` uses `scripts/provision_python.ps1`; on macOS/Linux, `scripts/initialize_job.sh` uses `scripts/provision_python.sh`, which verifies the published `uv` SHA-256 and provisions Python 3.12 without admin access. The bootstrap then creates the isolated venv and installs `runtime/requirements.txt`. Under `--auto`, `runtime/toolchain.py` installs machine-local ffmpeg/ffprobe when no verified system pair exists. A transcription action installs `runtime/requirements-ml.txt` on first use. Do not ask the user to perform routine installations.
+
 If Internet/package access is unavailable, choose an installed fallback and mark the preferred path unavailable rather than blocking unnecessarily.
+
+## Stage E2 — Crafting Apps CLI installation and probe
+
+The default editor policy is `crafting-first`. Only the two video-related apps are in scope:
+
+- FilmCraft (`filmcraft-cli`) for nonlinear video editing, color, sound, captions, interchange, and delivery;
+- EffectCraft (`effectcraft-cli`) for motion graphics, compositing, VFX, animation, and rendering.
+
+Do not install or route work to other Crafting Apps. First search `PATH` and the machine-local state directory. When a required CLI is missing and routine downloads are permitted, run `runtime/crafting_apps.py install`; use only official `storytold/filmcraft` and `storytold/effectcraft` GitHub release assets and require the matching entry in `SHA256SUMS.txt` before extraction. Never execute an unverified download.
+
+Probe each CLI with `--version` and its JSON command catalog (`filmcraft-cli commands --json`; `effectcraft-cli exec --list --schemas --json`). A CLI is available only when both probes succeed and the catalog contains at least one command; record the returned command names for routing and feature checks. A binary path or version string alone is not an available editing capability.
+
+Record the routing policy and this strict priority order:
+
+1. FilmCraft CLI for editing operations;
+2. EffectCraft CLI for motion/VFX operations;
+3. Premiere Pro / After Effects for features unavailable or failing verification in the matching Crafting App;
+4. Adobe UI automation / Computer Use as the final compatibility layer.
+
+Under `crafting-first`, do not launch Adobe during initialization merely because either Crafting Apps CLI is unavailable. Record the missing role and activate/probe the matching Adobe surface only when a required operation selects that fallback. Under `adobe-only`, prepare and probe the installed Adobe hosts during initialization.
 
 ## Stage F — Premiere control-surface probe
 
@@ -256,7 +281,7 @@ Probe in this order where applicable:
 4. UXP Hybrid/native support when installed host supports it;
 5. legacy CEP/ExtendScript adapter when present/needed;
 6. QE adapter only as an unsupported compatibility fallback;
-7. Windows UI Automation ability to identify the Premiere window and stable controls;
+7. Windows UI Automation or macOS Accessibility ability to identify the Premiere window and stable controls;
 8. vision/Computer Use availability as last resort.
 
 For the persistent Premiere bridge:
@@ -286,8 +311,8 @@ If a high-level test fails, continue down the fallback ladder and record the fai
 
 Probe:
 
-1. `AfterFX.exe` availability/version;
-2. command-line JSX execution (`afterfx -r` on Windows when supported);
+1. the platform After Effects executable's availability/version;
+2. command-line JSX execution (`AfterFX.exe -r` on Windows or the application binary's `-r` mode on macOS);
 3. ability to write a machine-readable completion marker from JSX;
 4. project create/save in a disposable location;
 5. `aerender` availability/version;
@@ -328,6 +353,14 @@ Use a structure equivalent to:
 
 ```json
 {
+  "routing": {
+    "policy": "crafting-first",
+    "priority_order": ["filmcraft", "effectcraft", "premiere", "after_effects"]
+  },
+  "crafting_apps": {
+    "filmcraft": {"available": true, "tested": true, "path": "..."},
+    "effectcraft": {"available": true, "tested": true, "path": "..."}
+  },
   "premiere": {
     "timeline_edit": {
       "preferred": "uxp",
@@ -375,6 +408,8 @@ Write `plans/init_state.json` with at least:
   "source_inventory": "analysis/source_inventory.json",
   "environment": "analysis/environment.json",
   "capability_matrix": "plans/capability_matrix.json",
+  "editor_priority": "crafting-first",
+  "preferred_editors": ["filmcraft", "effectcraft", "premiere", "after_effects"],
   "preferred_premiere_surface": "uxp",
   "preferred_ae_surface": "jsx",
   "degraded_capabilities": [],
@@ -443,7 +478,7 @@ On `READY` or `DEGRADED`:
 
 1. return the absolute job root;
 2. return paths to initialization artifacts;
-3. return preferred Premiere/AE execution surfaces;
+3. return the ordered preferred editors, Crafting Apps CLI paths, and Adobe fallback surfaces;
 4. list degraded paths and their tested fallbacks;
 5. set `next` to `workflow-routing`;
 6. hand control back to the root `adobe-autonomous-editor/SKILL.md`.
@@ -461,7 +496,7 @@ This initializer may:
 - inspect media technically;
 - create test assets/projects;
 - install/build routine automation infrastructure;
-- test Adobe control surfaces;
+- test Crafting Apps and Adobe control surfaces;
 - prepare proxies only when required to prove decoding/toolchain compatibility and clearly mark them as initialization artifacts.
 
 It must **not**:

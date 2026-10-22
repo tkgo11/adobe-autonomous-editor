@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Execute a machine-readable edit plan across Premiere, AE, desktop and QC.
+"""Execute a machine-readable edit plan across Crafting Apps, Adobe, desktop and QC.
 
 Each action can carry bounded retries, verification actions, and explicit fallbacks.
-This lets a job downgrade per operation (e.g. UXP -> UIA) without restarting the
-whole orchestration cycle.
+This lets a job downgrade per operation (e.g. FilmCraft -> Premiere -> platform
+desktop accessibility)
+without restarting the whole orchestration cycle.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
+import errno
 import json
 import subprocess
 import sys
@@ -17,17 +19,45 @@ import uuid
 from pathlib import Path
 
 from ae_rpc import compile_jsx, dispatch as ae_dispatch
+from broker_util import start_broker
+from crafting_apps import run_cli as run_crafting_cli
 from desktop_driver import run_steps
+from platform_support import launch_application, upia_install_command
 from rpc_client import call as ws_call
+from toolchain import restore_media_path
+from transcription_runtime import ensure_transcription_runtime
 
 
 def minimal_plan_check(plan):
     """Structural fallback when the jsonschema package/schema is unavailable."""
     if not isinstance(plan, dict) or not isinstance(plan.get("actions"), list):
         raise SystemExit("Invalid plan: expected a JSON object with an 'actions' array")
-    for i, action in enumerate(plan["actions"]):
+    def check_action(action, location):
         if not isinstance(action, dict) or "engine" not in action:
-            raise SystemExit(f"Invalid plan: action[{i}] must be an object with an 'engine' field")
+            raise SystemExit(f"Invalid plan: {location} must be an object with an 'engine' field")
+        engine = action.get("engine")
+        if engine == "shell":
+            argv = action.get("argv")
+            if not isinstance(argv, list) or not argv or not all(isinstance(value, str) for value in argv):
+                raise SystemExit(f"Invalid plan: shell {location} requires a non-empty string-only argv array")
+        if engine in {"filmcraft", "effectcraft"}:
+            argv = action.get("argv")
+            if not isinstance(argv, list) or not argv or not all(
+                isinstance(value, (str, int, float)) and not isinstance(value, bool) for value in argv
+            ):
+                raise SystemExit(f"Invalid plan: {engine} {location} requires a non-empty argv array")
+        verify = action.get("verify")
+        checks = verify if isinstance(verify, list) else [verify] if verify is not None else []
+        for index, check in enumerate(checks):
+            check_action(check, f"{location}.verify[{index}]")
+        fallbacks = action.get("fallbacks", [])
+        if not isinstance(fallbacks, list):
+            raise SystemExit(f"Invalid plan: {location}.fallbacks must be an array")
+        for index, fallback in enumerate(fallbacks):
+            check_action(fallback, f"{location}.fallbacks[{index}]")
+
+    for i, action in enumerate(plan["actions"]):
+        check_action(action, f"action[{i}]")
 
 
 def load_plan(plan_path: Path, skill: Path):
@@ -58,6 +88,79 @@ def load_plan(plan_path: Path, skill: Path):
     return plan
 
 
+def premiere_needs_activation(result: dict) -> bool:
+    if result.get("ok"):
+        return False
+    error = str(result.get("error") or "").lower()
+    if result.get("activationRequired"):
+        return True
+    return any(marker in error for marker in (
+        "premiere bridge is not connected", "broker unavailable",
+        "connection refused", "connect call failed", "timed out",
+        "actively refused", "remote computer refused",
+        "winerror 10061", "winerror 1225",
+    ))
+
+
+def premiere_connection_exception(exc: BaseException) -> bool:
+    """Recognize refusal errors without depending on platform-specific wording."""
+    current = exc
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ConnectionRefusedError):
+            return True
+        if getattr(current, "errno", None) in {errno.ECONNREFUSED, 10061, 1225}:
+            return True
+        if getattr(current, "winerror", None) in {10061, 1225}:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _read_json(path: Path) -> dict:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
+def _walk_actions(actions):
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        yield action
+        verify = action.get("verify")
+        if isinstance(verify, dict):
+            yield from _walk_actions([verify])
+        elif isinstance(verify, list):
+            yield from _walk_actions(verify)
+        fallbacks = action.get("fallbacks")
+        if isinstance(fallbacks, list):
+            yield from _walk_actions(fallbacks)
+
+
+def validate_editor_policy(plan: dict, initialized_policy: str) -> str:
+    """Require the plan to stay within the policy recorded at initialization."""
+    if initialized_policy not in {"crafting-first", "adobe-only"}:
+        raise SystemExit("Execution requires an initialized editor policy in capability_matrix.json or init_state.json")
+    requested = plan.get("editorPolicy")
+    if requested is not None and requested != initialized_policy:
+        raise SystemExit(
+            f"Plan editorPolicy {requested!r} does not match initialized policy {initialized_policy!r}; reinitialize the job to change policy"
+        )
+    if initialized_policy == "adobe-only":
+        violations = [
+            action.get("engine") for action in _walk_actions(plan.get("actions", []))
+            if action.get("engine") in {"filmcraft", "effectcraft"}
+        ]
+        if violations:
+            engines = ", ".join(sorted(set(violations)))
+            raise SystemExit(f"Adobe-only policy forbids Crafting Apps actions: {engines}")
+    return initialized_policy
+
+
 class Executor:
     def __init__(self, job: Path, skill: Path, control_uri: str):
         self.job = job
@@ -65,11 +168,160 @@ class Executor:
         self.control_uri = control_uri
         self.secret = (job / "runtime/bridge-secret.txt").read_text(encoding="utf-8").strip()
         self.env = json.loads((job / "analysis/environment.json").read_text(encoding="utf-8"))
+        self.capabilities = _read_json(job / "plans/capability_matrix.json")
+        self.init_state = _read_json(job / "plans/init_state.json")
+        self.editor_policy = (
+            ((self.capabilities.get("routing") or {}).get("policy"))
+            or self.init_state.get("editor_priority")
+        )
+        state_dir = self.init_state.get("machine_state_dir")
+        self.bridge_marker = Path(state_dir) / "premiere-bridge-install.json" if state_dir else None
+        restore_media_path(self.env)
+
+    def bridge_marker_matches(self, package_hash: str | None) -> bool:
+        if not self.bridge_marker or not package_hash:
+            return False
+        marker = _read_json(self.bridge_marker)
+        return marker.get("ok") is True and marker.get("package_sha256") == package_hash
+
+    def persist_bridge_marker(self, package_hash: str, ccx: Path) -> None:
+        if not self.bridge_marker:
+            return
+        self.bridge_marker.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "ok": True, "package_sha256": package_hash,
+            "installed_at": time.time(), "ccx": str(ccx),
+        }
+        temporary = self.bridge_marker.with_name(self.bridge_marker.name + f".{uuid.uuid4().hex}.tmp")
+        temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        temporary.replace(self.bridge_marker)
+
+    def install_premiere_bridge(self, upia: str | None, ccx: Path, package_hash: str | None, timeout: float, op: str = "install_bridge") -> dict:
+        if not upia or not ccx.exists():
+            missing = "Adobe UPIA not found" if not upia else f"bridge package not found: {ccx}"
+            return {"op": op, "ok": False, "error": missing}
+        try:
+            install = subprocess.run(
+                upia_install_command(upia, ccx), text=True, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, timeout=min(120, max(20, timeout)),
+            )
+            step = {
+                "op": op, "ok": install.returncode == 0,
+                "returncode": install.returncode, "stdout": install.stdout[-4000:],
+                "stderr": install.stderr[-4000:],
+            }
+            if install.returncode == 0 and package_hash:
+                try:
+                    self.persist_bridge_marker(package_hash, ccx)
+                except Exception as exc:
+                    step["marker_error"] = str(exc)
+            return step
+        except Exception as exc:
+            return {"op": op, "ok": False, "error": str(exc)}
+
+    def activate_premiere_fallback(self, timeout: float = 60) -> dict:
+        """Prepare Premiere only when a selected fallback actually needs it."""
+        recovery = {"ok": False, "attempted": True, "steps": []}
+        tools = self.env.get("tools") or {}
+        premiere = tools.get("premiere")
+        if not premiere:
+            recovery["error"] = "Premiere Pro is not installed"
+            return recovery
+
+        ccx = self.job / "runtime/com.autonomous-editor.bridge.ccx"
+        upia = tools.get("upia")
+        install_capability = ((self.capabilities.get("premiere") or {}).get("uxp_install") or {})
+        package_hash = install_capability.get("package_sha256")
+        bridge_ready = bool(install_capability.get("ok")) or self.bridge_marker_matches(package_hash)
+        if bridge_ready:
+            recovery["steps"].append({"op": "install_bridge", "ok": True, "reused": True})
+        else:
+            recovery["steps"].append(self.install_premiere_bridge(upia, ccx, package_hash, timeout))
+
+        try:
+            process = start_broker(self.skill, self.job, control_uri=self.control_uri)
+            recovery["steps"].append({"op": "start_broker", "ok": True, "pid": process.pid})
+        except Exception as exc:
+            recovery["steps"].append({"op": "start_broker", "ok": False, "error": str(exc)})
+        try:
+            launch_application(premiere)
+            recovery["steps"].append({"op": "launch_premiere", "ok": True})
+        except Exception as exc:
+            recovery["steps"].append({"op": "launch_premiere", "ok": False, "error": str(exc)})
+            recovery["error"] = str(exc)
+            return recovery
+
+        deadline = time.time() + max(5, timeout)
+        repair_at = time.time() + min(10, max(1, timeout / 3)) if bridge_ready else None
+        repair_attempted = False
+        last_error = None
+        while time.time() < deadline:
+            try:
+                ping = asyncio.run(ws_call(self.control_uri, self.secret, "ping", {}, 4, open_timeout=2, close_timeout=1))
+                if ping.get("ok"):
+                    recovery.update({"ok": True, "probe": ping})
+                    return recovery
+                last_error = ping.get("error")
+            except Exception as exc:
+                last_error = str(exc)
+            if repair_at is not None and not repair_attempted and time.time() >= repair_at:
+                repair_attempted = True
+                repair = self.install_premiere_bridge(upia, ccx, package_hash, timeout, "repair_bridge")
+                recovery["steps"].append(repair)
+                if repair.get("ok"):
+                    try:
+                        launch_application(premiere)
+                        recovery["steps"].append({"op": "relaunch_premiere_after_repair", "ok": True})
+                    except Exception as exc:
+                        recovery["steps"].append({"op": "relaunch_premiere_after_repair", "ok": False, "error": str(exc)})
+                else:
+                    last_error = repair.get("error") or repair.get("stderr") or last_error
+            time.sleep(min(1, max(0, deadline - time.time())))
+        recovery["error"] = last_error or "Premiere bridge did not connect before timeout"
+        return recovery
 
     def primitive(self, a):
         engine = a.get("engine")
+        if engine in {"filmcraft", "effectcraft"}:
+            tool_key = f"{engine}_cli"
+            executable = (self.env.get("tools") or {}).get(tool_key)
+            if not executable:
+                return {"ok": False, "error": f"{engine}-cli executable unavailable"}
+            argv = a.get("argv")
+            if not isinstance(argv, list) or not argv or not all(
+                isinstance(x, (str, int, float)) and not isinstance(x, bool) for x in argv
+            ):
+                return {"ok": False, "error": f"{engine} action requires a non-empty argv array"}
+            return run_crafting_cli(
+                executable,
+                [str(x) for x in argv],
+                timeout=float(a.get("timeout", 3600)),
+                cwd=a.get("cwd"),
+            )
+
         if engine == "premiere":
-            return asyncio.run(ws_call(self.control_uri, self.secret, a.get("op"), a.get("args", {}), float(a.get("timeout", 90))))
+            timeout = float(a.get("timeout", 90))
+            try:
+                first = asyncio.run(ws_call(self.control_uri, self.secret, a.get("op"), a.get("args", {}), timeout))
+            except Exception as exc:
+                first = {
+                    "ok": False, "error": str(exc),
+                    "exceptionType": type(exc).__name__,
+                    "activationRequired": premiere_connection_exception(exc),
+                }
+            if first.get("ok"):
+                return first
+            if not premiere_needs_activation(first):
+                return first
+            activation = self.activate_premiere_fallback(min(timeout, 90))
+            if not activation.get("ok"):
+                return {**first, "adobeActivation": activation}
+            try:
+                result = asyncio.run(ws_call(self.control_uri, self.secret, a.get("op"), a.get("args", {}), timeout))
+                result["adobeActivation"] = activation
+                return result
+            except Exception as exc:
+                return {"ok": False, "error": str(exc), "adobeActivation": activation}
 
         if engine == "after_effects":
             payload = {"undoGroup": a.get("undoGroup", "Autonomous Editor"), "actions": a.get("actions", [a.get("action")])}
@@ -90,7 +342,7 @@ class Executor:
 
         if engine == "analysis":
             out = Path(a.get("out", self.job / "analysis" / (Path(a["media"]).stem + ".analysis.json")))
-            cmd = [sys.executable, str(self.skill / "runtime/analyze_media.py"), a["media"], "--out", str(out)]
+            cmd = [sys.executable, str(self.skill / "runtime/analyze_media.py"), a["media"], "--out", str(out), "--environment", str(self.job / "analysis/environment.json")]
             if a.get("sceneThreshold") is not None:
                 cmd += ["--scene-threshold", str(a["sceneThreshold"])]
             if a.get("minSilence") is not None:
@@ -99,17 +351,25 @@ class Executor:
             return {"ok": p.returncode == 0, "returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr, "analysis": str(out)}
 
         if engine == "transcribe":
+            backend = str(a.get("backend", "auto"))
+            dependency = (
+                ensure_transcription_runtime(self.skill)
+                if backend in {"auto", "faster-whisper"}
+                else {"ok": True, "installed": False, "skipped": True, "reason": f"{backend} does not use faster-whisper"}
+            )
+            if not dependency.get("ok") and backend == "faster-whisper":
+                return {"ok": False, "error": "could not provision local transcription runtime", "dependency": dependency}
             out_dir = Path(a.get("outDir", self.job / "analysis" / (Path(a["media"]).stem + "-transcript")))
             cmd = [sys.executable, str(self.skill / "runtime/transcribe.py"), a["media"], "--out-dir", str(out_dir), "--model", str(a.get("model", "large-v3"))]
             for flag, key in [("--language", "language"), ("--device", "device"), ("--compute-type", "computeType"), ("--backend", "backend")]:
                 if a.get(key) is not None:
                     cmd += [flag, str(a[key])]
             p = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=float(a.get("timeout", 7200)))
-            return {"ok": p.returncode == 0, "returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr, "outDir": str(out_dir)}
+            return {"ok": p.returncode == 0, "returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr, "outDir": str(out_dir), "dependency": dependency}
 
         if engine == "qc":
             out = Path(a.get("out", self.job / "qc" / (Path(a["media"]).name + ".json")))
-            cmd = [sys.executable, str(self.skill / "scripts/qc.py"), a["media"], "--out", str(out)]
+            cmd = [sys.executable, str(self.skill / "scripts/qc.py"), a["media"], "--out", str(out), "--environment", str(self.job / "analysis/environment.json")]
             if a.get("spec"):
                 cmd += ["--spec", str(a["spec"])]
             if a.get("strict"):
@@ -120,13 +380,16 @@ class Executor:
         if engine == "review":
             out_dir = Path(a.get("outDir", self.job / "qc" / (Path(a["media"]).stem + "-review")))
             p = subprocess.run(
-                [sys.executable, str(self.skill / "runtime/review_packet.py"), a["media"], "--out-dir", str(out_dir), "--frames", str(int(a.get("frames", 12)))],
+                [sys.executable, str(self.skill / "runtime/review_packet.py"), a["media"], "--out-dir", str(out_dir), "--frames", str(int(a.get("frames", 12))), "--environment", str(self.job / "analysis/environment.json")],
                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=float(a.get("timeout", 600)),
             )
             return {"ok": p.returncode == 0, "returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr, "packet": str(out_dir / "review-packet.json")}
 
         if engine == "shell":
-            p = subprocess.run(a["argv"], cwd=a.get("cwd"), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=float(a.get("timeout", 300)))
+            argv = a.get("argv")
+            if not isinstance(argv, list) or not argv or not all(isinstance(value, str) for value in argv):
+                return {"ok": False, "error": "shell action requires a non-empty string-only argv array"}
+            p = subprocess.run(argv, cwd=a.get("cwd"), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=float(a.get("timeout", 300)))
             return {"ok": p.returncode == 0, "returncode": p.returncode, "stdout": p.stdout[-16000:], "stderr": p.stderr[-16000:]}
 
         raise RuntimeError(f"Unknown engine: {engine}")
@@ -192,6 +455,7 @@ def main():
         ex = Executor(job, skill, ns.control_uri)
     except Exception as exc:
         raise SystemExit(f"Executor init failed for job {job}: {exc}")
+    editor_policy = validate_editor_policy(plan, ex.editor_policy)
     results = []
 
     for i, action in enumerate(plan["actions"]):
@@ -203,7 +467,11 @@ def main():
 
     out = Path(plan.get("report", job / "logs/execution-report.json"))
     out.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"ok": all(x["result"].get("ok") for x in results), "results": results}
+    payload = {
+        "ok": all(x["result"].get("ok") for x in results),
+        "editorPolicy": editor_policy,
+        "results": results,
+    }
     out.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     raise SystemExit(0 if payload["ok"] else 2)

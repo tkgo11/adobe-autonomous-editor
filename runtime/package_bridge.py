@@ -21,7 +21,14 @@ def package(template:Path,out_dir:Path,secret:str):
     ccx=out_dir/"com.autonomous-editor.bridge.ccx"
     with zipfile.ZipFile(ccx,"w",zipfile.ZIP_DEFLATED) as z:
         for f in sorted(work.rglob("*")):
-            if f.is_file() and not f.name.endswith(".bak"):z.write(f,f.relative_to(work).as_posix())
+            if f.is_file() and not f.name.endswith(".bak"):
+                # Stable metadata makes the package digest content-addressed,
+                # allowing a machine-wide successful-install marker to be
+                # reused by later jobs with the same bridge secret.
+                info=zipfile.ZipInfo(f.relative_to(work).as_posix(),(1980,1,1,0,0,0))
+                info.compress_type=zipfile.ZIP_DEFLATED
+                info.external_attr=(0o100644 & 0xFFFF)<<16
+                z.writestr(info,f.read_bytes())
     return work,ccx
 
 def main():
