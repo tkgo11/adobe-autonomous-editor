@@ -315,7 +315,8 @@ def acquire(job: Path, needs: list[dict]) -> dict:
                                and not (r.get("rights", {}).get("asset_origin") == "stock"
                                         and r.get("rights", {}).get("source_url") == item["source_url"])]
                         old.append(record)
-                        output["downloaded"].append(str(path))
+                        if str(path) not in output["downloaded"]:
+                            output["downloaded"].append(str(path))
                         break
                     except Exception as exc:
                         output["errors"].append(f"{item['provider']} {item['id']}: {safe_error(exc)}")

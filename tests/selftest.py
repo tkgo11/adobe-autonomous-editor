@@ -285,8 +285,11 @@ def main():
                                             "Pexels License", stock_assets.LICENSES["pexels"])
         with patch.object(stock_assets, "PROVIDERS", (lambda query, media_type: [stock_item],)), \
              patch.object(stock_assets, "save_media", side_effect=lambda item, job: _write_stock_fixture(job)):
-            acquired = stock_assets.acquire(stock_job, [{"media_type": "image", "query": "forest", "reason": "establish location"}])
-        check(len(acquired["downloaded"]) == 1, "supplementary media was not acquired")
+            acquired = stock_assets.acquire(stock_job, [
+                {"media_type": "image", "query": "forest", "reason": "establish location"},
+                {"media_type": "image", "query": "woodland", "reason": "support narration"},
+            ])
+        check(len(acquired["downloaded"]) == 1, "repeated supplementary media path was not deduplicated")
         stock_rights = json.loads((stock_job / "analysis/asset_rights.json").read_text())
         check(stock_rights["assets"][0]["rights"]["license_url"] == stock_assets.LICENSES["pexels"],
               "supplementary media license link was not recorded")
