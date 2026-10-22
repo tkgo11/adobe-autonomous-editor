@@ -22,8 +22,11 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from broker_util import read_json, start_broker
+from asset_download import DownloadError, download, is_url, public_url, rights_record, safe_error_message, write_rights_report
+from source_inventory import fingerprint
 from crafting_apps import APPS as CRAFTING_APPS
 from crafting_apps import discover as discover_crafting_app
 from crafting_apps import install_video_clis, probe as probe_crafting_app
@@ -64,6 +67,64 @@ def read_source_inventory(path: Path):
         return {"sources": []}
 
 
+def valid_download_cache(entry: dict, job: Path) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    paths = entry.get("paths", [])
+    if not paths or not isinstance(entry.get("rights"), dict):
+        return False
+    root = (job / "source/downloads").resolve()
+    try:
+        return all(
+            Path(p).is_file() and Path(p).stat().st_size > 0
+            and Path(p).resolve().is_relative_to(root)
+            and fingerprint(Path(p)) == entry.get("fingerprints", {}).get(p)
+            for p in paths
+        )
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def merge_rights_records(*groups):
+    merged = {}
+    for group in groups:
+        for record in group:
+            rights = record.get("rights", {})
+            key = (rights.get("asset_origin", "user_url"), rights.get("source_url"))
+            merged[key] = record
+    return list(merged.values())
+
+
+def read_asset_rights(job: Path) -> list[dict]:
+    try:
+        records = json.loads((job / "analysis/asset_rights.json").read_text(encoding="utf-8")).get("assets", [])
+        return [r for r in records if isinstance(r, dict) and isinstance(r.get("rights"), dict)]
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
+def is_stock_rights_record(record: dict) -> bool:
+    rights = record.get("rights", {})
+    if rights.get("asset_origin"):
+        return rights["asset_origin"] == "stock"
+    # Preserve records created by earlier versions that predate asset_origin.
+    try:
+        host = urlsplit(rights.get("source_url", "")).hostname or ""
+    except ValueError:
+        host = ""
+    return host in {"pexels.com", "www.pexels.com", "pixabay.com", "www.pixabay.com",
+                    "commons.wikimedia.org", "shutterstock.com", "www.shutterstock.com"}
+
+
+def remove_invalid_cached_files(entry: dict, job: Path) -> None:
+    root = (job / "source/downloads").resolve()
+    for raw_path in entry.get("paths", []) if isinstance(entry, dict) else []:
+        path = Path(raw_path)
+        try:
+            if path.resolve().is_relative_to(root) and path.is_file():
+                path.unlink()
+        except (OSError, ValueError):
+            continue
 def should_prepare_adobe(editor_priority: str, auto: bool) -> bool:
     return bool(auto and editor_priority == "adobe-only")
 
@@ -257,12 +318,65 @@ def main():
 
     inventory_path = job / "analysis/source_inventory.json"
     inventory_run = {"returncode": 2, "stderr": "no sources supplied"}
-    if ns.source:
-        inv_cmd = [sys.executable, str(skill / "runtime/source_inventory.py"), *ns.source, "--out", str(inventory_path)]
+    resolved_sources = []
+    current_public_urls = {public_url(s) for s in ns.source if s.lower().startswith(("http://", "https://"))}
+    prior_rights_records = [r for r in read_asset_rights(job)
+                            if is_stock_rights_record(r) or r.get("rights", {}).get("source_url") in current_public_urls]
+    rights_records = list(prior_rights_records)
+    download_errors = []
+    cache_path = job / "analysis/download_cache.json"
+    try:
+        download_cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        download_cache = {}
+    for source in ns.source:
+        if source.lower().startswith(("http://", "https://")):
+            public_source = public_url(source)
+            try:
+                if not is_url(source):
+                    raise ValueError("Invalid HTTP(S) source URL")
+                key = hashlib.sha256(source.encode("utf-8")).hexdigest()
+                cached = download_cache.get(key, {})
+                if valid_download_cache(cached, job):
+                    resolved_sources.extend(cached["paths"])
+                    rights_records.append({"paths": cached["paths"], "rights": cached["rights"]})
+                    continue
+                if cached:
+                    remove_invalid_cached_files(cached, job)
+                    download_cache.pop(key, None)
+                result = download(source, job)
+                resolved_sources.extend(result["paths"])
+                rights_records.append({"paths": result["paths"], "rights": result["rights"]})
+                download_cache[key] = {"paths": result["paths"], "rights": result["rights"],
+                                       "fingerprints": {p: fingerprint(Path(p)) for p in result["paths"]}}
+                cache_path.write_text(json.dumps(download_cache, indent=2, ensure_ascii=False), encoding="utf-8")
+            except Exception as exc:
+                error = safe_error_message(exc)
+                download_errors.append(f"{public_source}: {error}")
+                rights = exc.rights if isinstance(exc, DownloadError) else rights_record(source)
+                rights["error"] = error
+                rights_records.append({"paths": [], "rights": rights})
+        else:
+            resolved_sources.append(source)
+    rights_records = merge_rights_records(prior_rights_records, rights_records)
+    downloads_root = (job / "source/downloads").resolve()
+    for record in rights_records:
+        for raw_path in record.get("paths", []):
+            path = Path(raw_path)
+            if path.is_file() and path.resolve().is_relative_to(downloads_root):
+                resolved_sources.append(str(path))
+    resolved_sources = list(dict.fromkeys(resolved_sources))
+    # Always refresh reports so removing the last URL source clears stale rights
+    # metadata that a later stock acquisition might otherwise reload.
+    write_rights_report(job, rights_records)
+    if resolved_sources:
+        inv_cmd = [sys.executable, str(skill / "runtime/source_inventory.py"), *resolved_sources, "--out", str(inventory_path)]
         p = subprocess.run(inv_cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         inventory_run = {"returncode": p.returncode, "stdout": p.stdout[-8000:], "stderr": p.stderr[-8000:]}
     else:
         inventory_path.write_text(json.dumps({"sources": []}, indent=2), encoding="utf-8")
+    if download_errors:
+        inventory_run["download_errors"] = download_errors
 
     crafting_install = {
         "requested": bool(ns.install_crafting_apps or ns.force_install_crafting_apps),
@@ -442,6 +556,8 @@ def main():
         bool(broker.get("premiere_connected")), bool(tools["afterfx"]),
         bool(ae_probe.get("script_rpc")),
     )
+    if download_errors:
+        status = "BLOCKED"
 
     notes = []
     if ns.editor_priority == "crafting-first":
@@ -478,6 +594,7 @@ def main():
     blockers = []
     if not sources_ok:
         blockers.append("no readable source media in inventory")
+    blockers.extend(f"source download failed: {error}" for error in download_errors)
     if ns.editor_priority == "adobe-only" and not adobe_any:
         blockers.append("Adobe-only policy requested but neither Premiere Pro nor After Effects is installed")
     elif ns.editor_priority == "crafting-first" and not (crafting_any or adobe_any):
@@ -496,6 +613,7 @@ def main():
         "job_root": str(job),
         "machine_state_dir": str(global_dir),
         "source_inventory": "analysis/source_inventory.json",
+        "asset_rights": "analysis/asset_rights.md" if rights_records else None,
         "environment": "analysis/environment.json",
         "capability_matrix": "plans/capability_matrix.json",
         "editor_priority": ns.editor_priority,

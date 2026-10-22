@@ -17,7 +17,7 @@ The initializer prepares the environment. It does **not** make creative editoria
 
 Input:
 
-- absolute or resolvable path(s) to user-provided footage/assets/project files;
+- absolute or resolvable path(s) to user-provided footage/assets/project files, or individual media URLs;
 - user brief verbatim;
 - optional existing job directory when resuming;
 - parent skill root.
@@ -27,6 +27,7 @@ Output:
 - initialized/resumed job directory;
 - `analysis/environment.json`;
 - `analysis/source_inventory.json`;
+- `analysis/asset_rights.json` and `analysis/asset_rights.md` when URL sources are supplied;
 - `plans/init_state.json`;
 - `plans/capability_matrix.json`;
 - `logs/initialize.log`;
@@ -161,6 +162,8 @@ Never store credentials, access tokens, or private keys in initialization report
 ## Stage C — Source inventory
 
 Build `analysis/source_inventory.json` without creative interpretation.
+
+For an explicitly supplied media URL, download the individual asset into `source/downloads/` and inventory that local file. Record the source URL, creator, source-provided license, and rights review notice in `analysis/asset_rights.json` and `analysis/asset_rights.md`. Treat absent license metadata as unknown; downloading never establishes reuse rights. Check site terms and permissions before using or publishing the asset.
 
 For each accessible source record at minimum:
 
