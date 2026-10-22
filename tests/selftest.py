@@ -134,11 +134,19 @@ def main():
     check(not asset_download.is_url("https://[::1"), "malformed URL should not crash classification")
     signed_url = "https://user:password@example.com/clip.mp4?token=private-token"
     check(asset_download.public_url(signed_url) == "https://example.com/clip.mp4", "source URL credentials were not removed")
+    check(asset_download.public_url("https://www.youtube.com/watch?v=abc&signature=private") ==
+          "https://www.youtube.com/watch?v=abc", "safe media identity was removed or signed query retained")
     unknown = asset_download.rights_record("https://example.com/video")
     check(unknown["license"] is None and unknown["license_status"] == "review_required", "missing license must require review")
     check("does not grant permission" in unknown["notice"], "missing license notice is unclear")
     licensed = asset_download.rights_record("https://example.com/video", {"license": "CC BY 4.0", "uploader": "Creator"})
     check(licensed["license"] == "CC BY 4.0" and licensed["creator"] == "Creator", "source license metadata lost")
+    check("choose non-live" in asset_download.safe_error_message(RuntimeError(
+        "choose non-live media; see https://example.com/watch?v=abc&token=private")), "actionable error was lost")
+    check("private" not in asset_download.safe_error_message(RuntimeError(
+        "see https://example.com/watch?v=abc&token=private")), "signed URL leaked in error text")
+    check(stock_assets.allowed_host("pexels", "vod-progressive.akamaized.net"), "Pexels video CDN was rejected")
+    check(stock_assets.allowed_host("shutterstock", "download1.shutterstock.com"), "Shutterstock video CDN was rejected")
 
     class FailedTransfer:
         def __init__(self, options):
@@ -340,6 +348,16 @@ def main():
             }}
             (cached_job / "analysis").mkdir()
             (cached_job / "analysis/download_cache.json").write_text(json.dumps(cache))
+            stock_asset = cached_job / "source/downloads/pexels/stock.jpg"
+            stock_asset.parent.mkdir(parents=True)
+            stock_asset.write_bytes(b"stock-fixture")
+            stock_rights = {"paths": [str(stock_asset)], "rights": {
+                "source_url": "https://www.pexels.com/photo/123/", "webpage_url": "https://www.pexels.com/photo/123/",
+                "title": "stock image", "creator": "artist", "license": "Pexels License",
+                "license_url": "https://www.pexels.com/license/", "license_status": "review_required",
+                "notice": "Review terms", "terms_notice": "Check terms",
+            }}
+            (cached_job / "analysis/asset_rights.json").write_text(json.dumps({"assets": [stock_rights]}))
             r = subprocess.run(
                 [sys.executable, str(ROOT / "runtime/initialize.py"), "--job-root", str(cached_job),
                  "--skill-root", str(ROOT), "--source", signed_url],
@@ -347,7 +365,10 @@ def main():
             )
             check(r.returncode in (0, 2), f"cached URL initialization crashed: {r.stderr[-400:]}")
             cached_init = json.loads((cached_job / "plans/init_state.json").read_text())
-            check(cached_init["source_files_found"] == 1, "resumed URL source was not reused")
+            check(cached_init["source_files_found"] == 2, "resumed URL or supplementary source was not reused")
+            persisted_rights = json.loads((cached_job / "analysis/asset_rights.json").read_text())["assets"]
+            check(any(r["rights"].get("license") == "Pexels License" for r in persisted_rights),
+                  "supplementary rights record was lost on reinitialization")
             for report in (cached_job / "analysis").glob("*.json"):
                 check("private-token" not in report.read_text() and "password" not in report.read_text(),
                       f"credentials leaked into {report.name}")

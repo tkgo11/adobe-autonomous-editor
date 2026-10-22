@@ -7,7 +7,7 @@ import re
 import shutil
 import time
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 MAX_BYTES = 2 * 1024 * 1024 * 1024
 MAX_SECONDS = 2 * 60 * 60
@@ -19,8 +19,15 @@ class DownloadError(RuntimeError):
         self.rights = rights
 
 
+def safe_error_message(exc: Exception) -> str:
+    """Keep actionable diagnostics while stripping signed URLs and userinfo."""
+    message = re.sub(r"https?://[^\s\]\[<>\"']+", lambda match: public_url(match.group(0).rstrip(".,)")), str(exc))
+    message = re.sub(r"[\r\n\t]+", " ", message)
+    return message[:500] or type(exc).__name__
+
+
 def public_url(value: str) -> str:
-    """Return a source reference without userinfo, query credentials, or fragment."""
+    """Keep public identity parameters while removing credentials and signatures."""
     try:
         parsed = urlsplit(value)
         host = parsed.hostname or ""
@@ -29,7 +36,13 @@ def public_url(value: str) -> str:
         if ":" in host:
             host = f"[{host}]"
         netloc = host + (f":{parsed.port}" if parsed.port else "")
-        return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+        safe_query = []
+        identity_parameters = {"v", "id", "videoid", "photoid", "assetid", "t", "start", "end", "list", "index", "locale", "feature"}
+        for key, item in parse_qsl(parsed.query, keep_blank_values=True):
+            normalized = re.sub(r"[^a-z0-9]", "", key.lower())
+            if normalized in identity_parameters and not normalized.startswith("xamz"):
+                safe_query.append((key, item))
+        return urlunsplit((parsed.scheme, netloc, parsed.path, urlencode(safe_query), ""))
     except ValueError:
         return "<invalid URL>"
 
@@ -69,7 +82,7 @@ def download(url: str, job: Path) -> dict:
     try:
         import yt_dlp
     except ImportError as exc:
-        raise RuntimeError("URL sources require yt-dlp; install runtime/requirements.txt") from exc
+        raise RuntimeError("URL sources require yt-dlp; install the runtime requirements") from exc
 
     destination = job / "source" / "downloads"
     destination.mkdir(parents=True, exist_ok=True)

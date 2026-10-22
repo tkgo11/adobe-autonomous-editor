@@ -161,19 +161,31 @@ ALLOWED_HOSTS = {
 }
 
 
+def allowed_host(provider: str, host: str | None) -> bool:
+    if not host:
+        return False
+    if host in ALLOWED_HOSTS[provider]:
+        return True
+    if provider == "pexels":
+        return host.endswith(".vimeocdn.com") or host == "vod-progressive.akamaized.net"
+    if provider == "shutterstock":
+        return host.startswith("download") and host.endswith(".shutterstock.com")
+    return False
+
+
 class ProviderRedirects(HTTPRedirectHandler):
-    def __init__(self, allowed: set[str]):
-        self.allowed = allowed
+    def __init__(self, provider: str):
+        self.provider = provider
 
     def redirect_request(self, request, fp, code, msg, headers, newurl):
-        if urlparse(newurl).scheme != "https" or urlparse(newurl).hostname not in self.allowed:
+        if urlparse(newurl).scheme != "https" or not allowed_host(self.provider, urlparse(newurl).hostname):
             raise ValueError("Download redirected outside the provider's media hosts")
         return super().redirect_request(request, fp, code, msg, headers, newurl)
 
 
 def save_media(item: dict, job: Path) -> Path:
     url = item.get("media_url")
-    if not url or urlparse(url).scheme != "https" or urlparse(url).hostname not in ALLOWED_HOSTS[item["provider"]]:
+    if not url or urlparse(url).scheme != "https" or not allowed_host(item["provider"], urlparse(url).hostname):
         raise ValueError("Provider returned an unexpected download host")
     suffix = Path(urlparse(url).path).suffix.lower()
     if suffix not in ({".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"} if item["media_type"] == "image" else {".mp4", ".webm", ".ogv", ".mov"}):
@@ -184,9 +196,9 @@ def save_media(item: dict, job: Path) -> Path:
         return destination
     partial = destination.with_suffix(destination.suffix + ".part")
     try:
-        opener = build_opener(ProviderRedirects(ALLOWED_HOSTS[item["provider"]]))
+        opener = build_opener(ProviderRedirects(item["provider"]))
         with opener.open(Request(url, headers=HEADERS), timeout=60) as response, partial.open("wb") as output:
-            if urlparse(response.url).hostname not in ALLOWED_HOSTS[item["provider"]]:
+            if not allowed_host(item["provider"], urlparse(response.url).hostname):
                 raise ValueError("Download redirected outside the provider's media hosts")
             if response.headers.get("Content-Type", "").lower().startswith(("text/", "application/json")):
                 raise ValueError("Provider returned a document instead of media")

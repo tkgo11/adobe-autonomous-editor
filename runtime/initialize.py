@@ -22,7 +22,7 @@ import uuid
 from pathlib import Path
 
 from broker_util import read_json, start_broker
-from asset_download import DownloadError, download, is_url, public_url, rights_record, write_rights_report
+from asset_download import DownloadError, download, is_url, public_url, rights_record, safe_error_message, write_rights_report
 from source_inventory import fingerprint
 from package_bridge import package as package_bridge
 from rpc_client import call as ws_call
@@ -117,6 +117,24 @@ def valid_download_cache(entry: dict, job: Path) -> bool:
         return False
 
 
+def merge_rights_records(*groups):
+    merged = {}
+    for group in groups:
+        for record in group:
+            rights = record.get("rights", {})
+            key = (tuple(record.get("paths", [])), rights.get("source_url"))
+            merged[key] = record
+    return list(merged.values())
+
+
+def read_asset_rights(job: Path) -> list[dict]:
+    try:
+        records = json.loads((job / "analysis/asset_rights.json").read_text(encoding="utf-8")).get("assets", [])
+        return [r for r in records if isinstance(r, dict) and isinstance(r.get("rights"), dict)]
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--job-root", required=True)
@@ -164,7 +182,8 @@ def main():
     inventory_path = job / "analysis/source_inventory.json"
     inventory_run = {"returncode": 2, "stderr": "no sources supplied"}
     resolved_sources = []
-    rights_records = []
+    prior_rights_records = read_asset_rights(job)
+    rights_records = list(prior_rights_records)
     download_errors = []
     cache_path = job / "analysis/download_cache.json"
     try:
@@ -190,13 +209,21 @@ def main():
                                        "fingerprints": {p: fingerprint(Path(p)) for p in result["paths"]}}
                 cache_path.write_text(json.dumps(download_cache, indent=2, ensure_ascii=False), encoding="utf-8")
             except Exception as exc:
-                error = str(exc) if isinstance(exc, ValueError) and str(exc) == "Invalid HTTP(S) source URL" else type(exc).__name__
+                error = safe_error_message(exc)
                 download_errors.append(f"{public_source}: {error}")
                 rights = exc.rights if isinstance(exc, DownloadError) else rights_record(source)
                 rights["error"] = error
                 rights_records.append({"paths": [], "rights": rights})
         else:
             resolved_sources.append(source)
+    rights_records = merge_rights_records(prior_rights_records, rights_records)
+    downloads_root = (job / "source/downloads").resolve()
+    for record in rights_records:
+        for raw_path in record.get("paths", []):
+            path = Path(raw_path)
+            if path.is_file() and path.resolve().is_relative_to(downloads_root):
+                resolved_sources.append(str(path))
+    resolved_sources = list(dict.fromkeys(resolved_sources))
     if rights_records:
         write_rights_report(job, rights_records)
     if resolved_sources:
