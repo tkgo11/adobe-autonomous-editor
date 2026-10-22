@@ -20,6 +20,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from broker_util import read_json, start_broker
 from asset_download import DownloadError, download, is_url, public_url, rights_record, safe_error_message, write_rights_report
@@ -122,7 +123,7 @@ def merge_rights_records(*groups):
     for group in groups:
         for record in group:
             rights = record.get("rights", {})
-            key = (tuple(record.get("paths", [])), rights.get("source_url"))
+            key = (rights.get("asset_origin", "user_url"), rights.get("source_url"))
             merged[key] = record
     return list(merged.values())
 
@@ -133,6 +134,30 @@ def read_asset_rights(job: Path) -> list[dict]:
         return [r for r in records if isinstance(r, dict) and isinstance(r.get("rights"), dict)]
     except (OSError, ValueError, AttributeError):
         return []
+
+
+def is_stock_rights_record(record: dict) -> bool:
+    rights = record.get("rights", {})
+    if rights.get("asset_origin"):
+        return rights["asset_origin"] == "stock"
+    # Preserve records created by earlier versions that predate asset_origin.
+    try:
+        host = urlsplit(rights.get("source_url", "")).hostname or ""
+    except ValueError:
+        host = ""
+    return host in {"pexels.com", "www.pexels.com", "pixabay.com", "www.pixabay.com",
+                    "commons.wikimedia.org", "shutterstock.com", "www.shutterstock.com"}
+
+
+def remove_invalid_cached_files(entry: dict, job: Path) -> None:
+    root = (job / "source/downloads").resolve()
+    for raw_path in entry.get("paths", []) if isinstance(entry, dict) else []:
+        path = Path(raw_path)
+        try:
+            if path.resolve().is_relative_to(root) and path.is_file():
+                path.unlink()
+        except (OSError, ValueError):
+            continue
 
 
 def main():
@@ -182,7 +207,9 @@ def main():
     inventory_path = job / "analysis/source_inventory.json"
     inventory_run = {"returncode": 2, "stderr": "no sources supplied"}
     resolved_sources = []
-    prior_rights_records = read_asset_rights(job)
+    current_public_urls = {public_url(s) for s in ns.source if s.lower().startswith(("http://", "https://"))}
+    prior_rights_records = [r for r in read_asset_rights(job)
+                            if is_stock_rights_record(r) or r.get("rights", {}).get("source_url") in current_public_urls]
     rights_records = list(prior_rights_records)
     download_errors = []
     cache_path = job / "analysis/download_cache.json"
@@ -202,6 +229,9 @@ def main():
                     resolved_sources.extend(cached["paths"])
                     rights_records.append({"paths": cached["paths"], "rights": cached["rights"]})
                     continue
+                if cached:
+                    remove_invalid_cached_files(cached, job)
+                    download_cache.pop(key, None)
                 result = download(source, job)
                 resolved_sources.extend(result["paths"])
                 rights_records.append({"paths": result["paths"], "rights": result["rights"]})

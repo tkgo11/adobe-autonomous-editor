@@ -71,6 +71,7 @@ def rights_record(url: str, info: dict | None = None, error: str | None = None) 
             "Source did not provide a license. Downloading does not grant permission to reuse or publish."
         ),
         "terms_notice": "Check the source site's terms and obtain any required permission before use.",
+        "asset_origin": "user_url",
         "error": error,
     }
 
@@ -90,7 +91,7 @@ def download(url: str, job: Path) -> dict:
         "noplaylist": True,
         "outtmpl": str(destination / "%(extractor_key)s" / "%(id)s.%(ext)s"),
         "restrictfilenames": True,
-        "nooverwrites": True,
+        "overwrites": True,
         "quiet": True,
         "no_warnings": True,
         "socket_timeout": 30,

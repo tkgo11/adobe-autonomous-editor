@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
 from urllib.error import HTTPError
@@ -93,6 +94,31 @@ def search_pixabay(query: str, media_type: str) -> list[dict]:
         found.append(candidate("pixabay", media_type, item["id"], item["pageURL"], media_url,
                                item.get("tags"), item.get("user"), "Pixabay Content License", LICENSES["pixabay"]))
     return found
+
+
+def pixabay_candidates(query: str, media_type: str, cache_path: Path) -> list[dict]:
+    """Cache Pixabay API responses for 24 hours as required by its API terms."""
+    import hashlib
+    api_key = os.getenv("PIXABAY_API_KEY") or ""
+    cache_key = hashlib.sha256(json.dumps(
+        [media_type, query[:100], hashlib.sha256(api_key.encode()).hexdigest()]
+    ).encode()).hexdigest()
+    try:
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cache = {}
+    if not isinstance(cache, dict):
+        cache = {}
+    entry = cache.get(cache_key, {})
+    if not isinstance(entry, dict):
+        entry = {}
+    if entry.get("cached_at", 0) + 24 * 60 * 60 > time.time() and isinstance(entry.get("items"), list):
+        return entry["items"]
+    items = search_pixabay(query, media_type)
+    cache[cache_key] = {"cached_at": time.time(), "items": items}
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(cache, indent=2, ensure_ascii=False), encoding="utf-8")
+    return items
 
 
 def search_commons(query: str, media_type: str) -> list[dict]:
@@ -233,6 +259,7 @@ def rights(item: dict) -> dict:
             "license": license_name, "license_url": item.get("license_url"),
             "attribution": item.get("attribution"),
             "license_status": item.get("license_status", "review_required"),
+            "asset_origin": "stock",
             "notice": "Verify license restrictions, attribution, model/property releases, and intended use before publishing."
                       if license_name else "A license is required before this asset can be downloaded or used.",
             "terms_notice": "Check the provider's current terms and retain attribution when required."}
@@ -245,6 +272,7 @@ def acquire(job: Path, needs: list[dict]) -> dict:
     output = {"needs": [], "downloaded": [], "errors": []}
     rights_path = job / "analysis" / "asset_rights.json"
     old = json.loads(rights_path.read_text(encoding="utf-8")).get("assets", []) if rights_path.exists() else []
+    search_cache = job / "analysis" / "provider_search_cache.json"
     for need in needs:
         media_type = need.get("media_type")
         query = str(need.get("query") or "").strip()
@@ -257,7 +285,8 @@ def acquire(job: Path, needs: list[dict]) -> dict:
             if entry["selected"]:
                 break
             try:
-                candidates = provider(query, media_type)
+                candidates = (pixabay_candidates(query, media_type, search_cache)
+                             if provider is search_pixabay else provider(query, media_type))
                 entry["candidates"].extend({k: v for k, v in item.items() if k != "media_url"} for item in candidates)
                 for item in candidates:
                     if not item.get("media_url"):

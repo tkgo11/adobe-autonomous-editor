@@ -126,7 +126,7 @@ def main():
     # --- In-process unit checks (stdlib-only modules; no Adobe host required) ---
     sys.path.insert(0, str(ROOT / "runtime"))
     sys.path.insert(0, str(ROOT / "scripts"))
-    import ae_rpc, analyze_media, asset_download, qc, source_inventory, stock_assets  # noqa: E402
+    import ae_rpc, analyze_media, asset_download, initialize, qc, source_inventory, stock_assets  # noqa: E402
 
     check(asset_download.is_url("https://www.youtube.com/watch?v=abc"), "YouTube URL not recognized")
     check(not asset_download.is_url("/media/clip.mov"), "local path treated as URL")
@@ -147,6 +147,14 @@ def main():
         "see https://example.com/watch?v=abc&token=private")), "signed URL leaked in error text")
     check(stock_assets.allowed_host("pexels", "vod-progressive.akamaized.net"), "Pexels video CDN was rejected")
     check(stock_assets.allowed_host("shutterstock", "download1.shutterstock.com"), "Shutterstock video CDN was rejected")
+    prior_failure = {"paths": [], "rights": {"source_url": "https://example.com/clip", "asset_origin": "user_url", "error": "timeout"}}
+    retried_success = {"paths": ["/job/source/downloads/clip.mp4"], "rights": {"source_url": "https://example.com/clip", "asset_origin": "user_url"}}
+    merged_records = initialize.merge_rights_records([prior_failure], [retried_success])
+    check(len(merged_records) == 1 and merged_records[0]["paths"], "successful URL retry did not replace its failure record")
+    check(not initialize.is_stock_rights_record({"rights": {"asset_origin": "user_url", "source_url": "https://youtube.com/watch?v=x"}}),
+          "a user URL was misclassified as a retained stock asset")
+    check(initialize.is_stock_rights_record({"rights": {"asset_origin": "stock", "source_url": "https://example.com/media"}}),
+          "stock source identity was not retained")
 
     class FailedTransfer:
         def __init__(self, options):
@@ -165,6 +173,29 @@ def main():
             raise AssertionError("failed transfer was accepted")
         except asset_download.DownloadError as exc:
             check(exc.rights["license"] == "CC BY 4.0", "transfer failure lost fetched rights metadata")
+
+    class ReplacingTransfer:
+        def __init__(self, options):
+            check(options.get("overwrites") is True, "invalid cached files would not be replaced")
+            self.path = Path(options["outtmpl"].replace("%(extractor_key)s", "Example").replace("%(id)s", "42").replace("%(ext)s", "mp4"))
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            return False
+        def extract_info(self, url, download):
+            if download:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                self.path.write_bytes(b"valid-media")
+                return {"filepath": str(self.path)}
+            return {"id": "42", "extractor_key": "Example", "ext": "mp4"}
+        def prepare_filename(self, info):
+            return str(self.path)
+    with tempfile.TemporaryDirectory() as media_dir, patch.dict(sys.modules, {"yt_dlp": SimpleNamespace(YoutubeDL=ReplacingTransfer)}):
+        stale = Path(media_dir) / "source/downloads/Example/42.mp4"
+        stale.parent.mkdir(parents=True)
+        stale.write_bytes(b"corrupt")
+        result = asset_download.download("https://example.com/clip", Path(media_dir))
+        check(Path(result["paths"][0]).read_bytes() == b"valid-media", "invalid cache path was not replaced")
 
     # Paid search results must remain candidates unless the account has a
     # redownloadable, non-comp license for that exact asset.
@@ -193,6 +224,15 @@ def main():
               "supplementary media license link was not recorded")
         stock_inventory = json.loads((stock_job / "analysis/source_inventory.json").read_text())
         check(len(stock_inventory["sources"]) == 1, "supplementary media was not inventoried")
+
+    with tempfile.TemporaryDirectory() as cache_dir:
+        cache_path = Path(cache_dir) / "provider_search_cache.json"
+        fake_item = {"provider": "pixabay", "id": "1"}
+        with patch.dict("os.environ", {"PIXABAY_API_KEY": "test-key"}), \
+             patch.object(stock_assets, "search_pixabay", return_value=[fake_item]) as search:
+            first = stock_assets.pixabay_candidates("ocean", "video", cache_path)
+            second = stock_assets.pixabay_candidates("ocean", "video", cache_path)
+        check(first == second == [fake_item] and search.call_count == 1, "Pixabay query was not cached")
 
     # AE JSX generation: payload text must survive placeholder substitution and
     # ES3 line terminators must be escaped.
@@ -351,13 +391,16 @@ def main():
             stock_asset = cached_job / "source/downloads/pexels/stock.jpg"
             stock_asset.parent.mkdir(parents=True)
             stock_asset.write_bytes(b"stock-fixture")
+            withdrawn_asset = cached_job / "source/downloads/Example/withdrawn.mp4"
+            withdrawn_asset.write_bytes(b"withdrawn-fixture")
             stock_rights = {"paths": [str(stock_asset)], "rights": {
                 "source_url": "https://www.pexels.com/photo/123/", "webpage_url": "https://www.pexels.com/photo/123/",
                 "title": "stock image", "creator": "artist", "license": "Pexels License",
                 "license_url": "https://www.pexels.com/license/", "license_status": "review_required",
                 "notice": "Review terms", "terms_notice": "Check terms",
             }}
-            (cached_job / "analysis/asset_rights.json").write_text(json.dumps({"assets": [stock_rights]}))
+            withdrawn_rights = {"paths": [str(withdrawn_asset)], "rights": asset_download.rights_record("https://example.com/withdrawn.mp4")}
+            (cached_job / "analysis/asset_rights.json").write_text(json.dumps({"assets": [stock_rights, withdrawn_rights]}))
             r = subprocess.run(
                 [sys.executable, str(ROOT / "runtime/initialize.py"), "--job-root", str(cached_job),
                  "--skill-root", str(ROOT), "--source", signed_url],
@@ -369,6 +412,10 @@ def main():
             persisted_rights = json.loads((cached_job / "analysis/asset_rights.json").read_text())["assets"]
             check(any(r["rights"].get("license") == "Pexels License" for r in persisted_rights),
                   "supplementary rights record was lost on reinitialization")
+            check(not any(r["rights"].get("source_url") == "https://example.com/withdrawn.mp4" for r in persisted_rights),
+                  "withdrawn direct URL remained in the rights report")
+            inventory_paths = {s["path"] for s in json.loads((cached_job / "analysis/source_inventory.json").read_text())["sources"]}
+            check(str(withdrawn_asset) not in inventory_paths, "withdrawn direct URL remained in source inventory")
             for report in (cached_job / "analysis").glob("*.json"):
                 check("private-token" not in report.read_text() and "password" not in report.read_text(),
                       f"credentials leaked into {report.name}")
