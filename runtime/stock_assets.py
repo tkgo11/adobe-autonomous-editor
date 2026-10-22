@@ -21,7 +21,7 @@ LICENSES = {
     "pexels": "https://www.pexels.com/license/",
     "pixabay": "https://pixabay.com/service/license-summary/",
 }
-HEADERS = {"User-Agent": "AdobeAutonomousEditor/1.0 (supplementary media research)"}
+HEADERS = {"User-Agent": "AdobeAutonomousEditor/1.0 (https://github.com/tkgo11/adobe-autonomous-editor)"}
 MAX_BYTES = 500 * 1024 * 1024
 
 
@@ -137,10 +137,13 @@ def search_commons(query: str, media_type: str) -> list[dict]:
         license_url = field("LicenseUrl")
         if not license_name or not license_url:
             continue
+        creator = field("Artist") or info.get("user")
+        required_text = field("AttributionRequired")
         found.append(candidate("commons", media_type, page["pageid"], info.get("descriptionurl"),
                                info.get("url"), clean_html(page.get("title")),
-                               field("Artist") or info.get("user"), license_name, license_url,
-                               attribution=field("AttributionRequired")))
+                               creator, license_name, license_url,
+                               attribution=field("Attribution") or field("Credit") or creator,
+                               attribution_required=(required_text.lower() in {"true", "1"}) if required_text else None))
     return found
 
 
@@ -156,6 +159,7 @@ def search_shutterstock(query: str, media_type: str) -> list[dict]:
         ident = str(item["id"])
         media_url = None
         license_name = None
+        license_error = None
         try:
             history = get_json(f"https://api.shutterstock.com/v2/{endpoint}/licenses?{urlencode({media_type + '_id': ident})}",
                                {"Authorization": f"Bearer {token}"})
@@ -166,15 +170,18 @@ def search_shutterstock(query: str, media_type: str) -> list[dict]:
                     link = post_json(f"https://api.shutterstock.com/v2/{endpoint}/licenses/{licensed['id']}/downloads",
                                      {"Authorization": f"Bearer {token}"})
                     media_url = link.get("url")
+                    if not media_url:
+                        raise RuntimeError("Shutterstock redownload returned no media URL")
                     license_name = licensed.get("license")
                     break
-        except Exception:
-            pass  # The search result remains a candidate requiring a license.
+        except Exception as exc:
+            license_error = safe_error(exc)
         found.append(candidate("shutterstock", media_type, ident,
                                f"https://www.shutterstock.com/{'video/clip' if media_type == 'video' else 'image-photo'}/{ident}",
                                media_url, item.get("description"), str((item.get("contributor") or {}).get("id") or "") or None,
                                license_name, "https://www.shutterstock.com/license",
-                               license_status="review_required" if media_url else "license_required"))
+                               license_status="license_check_failed" if license_error else ("review_required" if media_url else "license_required"),
+                               license_error=license_error))
     return found
 
 
@@ -229,6 +236,8 @@ def save_media(item: dict, job: Path) -> Path:
             if response.headers.get("Content-Type", "").lower().startswith(("text/", "application/json")):
                 raise ValueError("Provider returned a document instead of media")
             length = int(response.headers.get("Content-Length", "0"))
+            if length < 0:
+                raise ValueError("Provider returned an invalid content length")
             if length > MAX_BYTES:
                 raise ValueError("Asset exceeds the 500 MB download limit")
             total = 0
@@ -237,6 +246,8 @@ def save_media(item: dict, job: Path) -> Path:
                 if total > MAX_BYTES:
                     raise ValueError("Asset exceeds the 500 MB download limit")
                 output.write(chunk)
+            if not total or (length and total != length):
+                raise ValueError("Provider returned an empty or incomplete media response")
         partial.replace(destination)
     finally:
         partial.unlink(missing_ok=True)
@@ -247,6 +258,8 @@ def safe_error(exc: Exception) -> str:
     # API and download errors can include credential-bearing URLs; never persist them.
     if isinstance(exc, HTTPError):
         return f"HTTP {exc.code}"
+    if isinstance(exc, RuntimeError) and re.fullmatch(r"Provider API returned HTTP \d{3}", str(exc)):
+        return str(exc)
     if isinstance(exc, ValueError) and str(exc).startswith(("Provider returned", "Download redirected", "Asset exceeds")):
         return str(exc)
     return type(exc).__name__
@@ -258,6 +271,7 @@ def rights(item: dict) -> dict:
             "title": item.get("title"), "creator": item.get("creator"),
             "license": license_name, "license_url": item.get("license_url"),
             "attribution": item.get("attribution"),
+            "attribution_required": item.get("attribution_required"),
             "license_status": item.get("license_status", "review_required"),
             "asset_origin": "stock",
             "notice": "Verify license restrictions, attribution, model/property releases, and intended use before publishing."
@@ -289,13 +303,17 @@ def acquire(job: Path, needs: list[dict]) -> dict:
                              if provider is search_pixabay else provider(query, media_type))
                 entry["candidates"].extend({k: v for k, v in item.items() if k != "media_url"} for item in candidates)
                 for item in candidates:
+                    if item.get("license_status") == "license_check_failed":
+                        output["errors"].append(f"{item['provider']} {item['id']} license check: {item['license_error']}")
                     if not item.get("media_url"):
                         continue
                     try:
                         path = save_media(item, job)
                         entry["selected"] = {"provider": item["provider"], "id": item["id"], "path": str(path)}
                         record = {"paths": [str(path)], "rights": rights(item)}
-                        old = [r for r in old if r.get("paths") != record["paths"]]
+                        old = [r for r in old if r.get("paths") != record["paths"]
+                               and not (r.get("rights", {}).get("asset_origin") == "stock"
+                                        and r.get("rights", {}).get("source_url") == item["source_url"])]
                         old.append(record)
                         output["downloaded"].append(str(path))
                         break
@@ -306,6 +324,13 @@ def acquire(job: Path, needs: list[dict]) -> dict:
         if not entry["selected"]:
             for item in entry["candidates"]:
                 if item.get("license_status") == "license_required":
+                    source = item["source_url"]
+                    if any(r.get("paths") and r.get("rights", {}).get("asset_origin") == "stock"
+                           and r.get("rights", {}).get("source_url") == source for r in old):
+                        continue
+                    old = [r for r in old if not (not r.get("paths")
+                           and r.get("rights", {}).get("asset_origin") == "stock"
+                           and r.get("rights", {}).get("source_url") == source)]
                     old.append({"paths": [], "rights": rights(item)})
     analysis = job / "analysis"
     analysis.mkdir(parents=True, exist_ok=True)

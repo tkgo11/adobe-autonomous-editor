@@ -153,6 +153,8 @@ def main():
         "see https://example.com/watch?v=abc&token=private")), "signed URL leaked in error text")
     check(stock_assets.allowed_host("pexels", "vod-progressive.akamaized.net"), "Pexels video CDN was rejected")
     check(stock_assets.allowed_host("shutterstock", "download1.shutterstock.com"), "Shutterstock video CDN was rejected")
+    check("https://github.com/tkgo11/adobe-autonomous-editor" in stock_assets.HEADERS["User-Agent"],
+          "Commons requests need a contact URL in their user agent")
     with patch.dict("os.environ", {"PEXELS_API_KEY": "test-token"}), \
          patch.object(stock_assets, "get_json", return_value={"videos": []}) as pexels_search:
         stock_assets.search_pexels("city at dusk", "video")
@@ -220,6 +222,61 @@ def main():
             check(found[0]["license_status"] == "license_required" and found[0]["media_url"] is None,
                   "unlicensed Shutterstock image was offered for download")
             check(not post.called, "unlicensed Shutterstock result triggered a download request")
+        def failed_license_lookup(url, headers=None):
+            if "/search?" in url:
+                return {"data": [{"id": "42", "description": "forest"}]}
+            raise RuntimeError("Provider API returned HTTP 403")
+        with patch.object(stock_assets, "get_json", side_effect=failed_license_lookup):
+            found = stock_assets.search_shutterstock("forest", "image")
+        check(found[0]["license_status"] == "license_check_failed"
+              and found[0]["license_error"] == "Provider API returned HTTP 403",
+              "failed Shutterstock license lookup was mistaken for no license")
+        with tempfile.TemporaryDirectory() as stock_dir, patch.object(stock_assets, "PROVIDERS", (lambda query, media_type: found,)):
+            lookup_result = stock_assets.acquire(Path(stock_dir), [{"media_type": "image", "query": "forest", "reason": "establish location"}])
+        check(any("HTTP 403" in error for error in lookup_result["errors"]),
+              "Shutterstock license lookup failure was omitted from acquisition errors")
+
+    commons_response = {"query": {"pages": {"123": {"pageid": 123, "title": "File:Example.jpg", "imageinfo": [{
+        "mime": "image/jpeg", "descriptionurl": "https://commons.wikimedia.org/wiki/File:Example.jpg",
+        "url": "https://upload.wikimedia.org/example.jpg", "user": "Uploader", "extmetadata": {
+            "LicenseShortName": {"value": "CC BY 4.0"}, "LicenseUrl": {"value": "https://creativecommons.org/licenses/by/4.0/"},
+            "Artist": {"value": "Artist"}, "Attribution": {"value": "Credit Artist / Example Collection"},
+            "AttributionRequired": {"value": "true"},
+        }}]}}}}
+    with patch.object(stock_assets, "get_json", return_value=commons_response):
+        commons_item = stock_assets.search_commons("example", "image")[0]
+    check(commons_item["attribution"] == "Credit Artist / Example Collection"
+          and stock_assets.rights(commons_item)["attribution_required"] is True,
+          "Commons credit text was replaced by its attribution-required flag")
+    with tempfile.TemporaryDirectory() as rights_dir:
+        asset_download.write_rights_report(Path(rights_dir), [{"paths": [], "rights": stock_assets.rights(commons_item)}])
+        report = (Path(rights_dir) / "analysis/asset_rights.md").read_text()
+        check("Attribution: Credit Artist / Example Collection" in report and "Attribution required: Yes" in report,
+              "Commons rights report omitted the required credit text")
+
+    class TruncatedResponse:
+        url = "https://cdn.pixabay.com/example.jpg"
+        headers = {"Content-Length": "10", "Content-Type": "image/jpeg"}
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            return False
+        def read(self, size):
+            if not hasattr(self, "sent"):
+                self.sent = True
+                return b"short"
+            return b""
+    with tempfile.TemporaryDirectory() as media_dir, patch.object(stock_assets, "build_opener") as opener:
+        opener.return_value.open.return_value = TruncatedResponse()
+        short_item = stock_assets.candidate("pixabay", "image", "short", "https://pixabay.com/photos/short/",
+                                             "https://cdn.pixabay.com/example.jpg", "Short", "Artist", "Pixabay Content License",
+                                             stock_assets.LICENSES["pixabay"])
+        try:
+            stock_assets.save_media(short_item, Path(media_dir))
+            raise AssertionError("truncated provider media was accepted")
+        except ValueError as exc:
+            check("incomplete" in str(exc), "truncated provider media produced the wrong error")
+        check(not list(Path(media_dir).rglob("short.jpg*")), "partial provider media was left behind")
 
     with tempfile.TemporaryDirectory() as stock_dir:
         stock_job = Path(stock_dir)
@@ -235,6 +292,19 @@ def main():
               "supplementary media license link was not recorded")
         stock_inventory = json.loads((stock_job / "analysis/source_inventory.json").read_text())
         check(len(stock_inventory["sources"]) == 1, "supplementary media was not inventoried")
+
+    with tempfile.TemporaryDirectory() as stock_dir:
+        stock_job = Path(stock_dir)
+        unlicensed = stock_assets.candidate("shutterstock", "image", "42",
+                                            "https://www.shutterstock.com/image-photo/42", None,
+                                            "Forest", None, None, "https://www.shutterstock.com/license",
+                                            license_status="license_required")
+        with patch.object(stock_assets, "PROVIDERS", (lambda query, media_type: [unlicensed],)):
+            for _ in range(2):
+                stock_assets.acquire(stock_job, [{"media_type": "image", "query": "forest", "reason": "establish location"}])
+        records = json.loads((stock_job / "analysis/asset_rights.json").read_text())["assets"]
+        check(len(records) == 1 and records[0]["rights"]["source_url"] == unlicensed["source_url"],
+              "repeated unlicensed candidate was duplicated in the rights report")
 
     with tempfile.TemporaryDirectory() as cache_dir:
         cache_path = Path(cache_dir) / "provider_search_cache.json"
