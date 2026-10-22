@@ -17,6 +17,9 @@ import sys
 from fractions import Fraction
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "runtime"))
+from toolchain import restore_job_media_path
+
 
 BLACK_RE = re.compile(r"black_start:(-?[0-9.]+) black_end:([0-9.]+) black_duration:([0-9.]+)")
 FREEZE_START_RE = re.compile(r"freeze_start: (-?[0-9.]+)")
@@ -170,11 +173,13 @@ def main():
     ap.add_argument("--out", default=None)
     ap.add_argument("--spec", help="JSON delivery spec")
     ap.add_argument("--strict", action="store_true", help="fail on detected black/freeze/silence policy violations too")
+    ap.add_argument("--environment", help="job analysis/environment.json (required outside the runtime wrapper)")
     args = ap.parse_args()
 
     media = Path(args.media).resolve()
     if not media.exists():
         raise SystemExit(f"File not found: {media}")
+    restore_job_media_path(args.environment)
     spec = load_spec(args.spec)
     ffmpeg = require("ffmpeg")
     ffprobe = require("ffprobe")

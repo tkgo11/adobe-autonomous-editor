@@ -2,7 +2,9 @@
 
 This repository is already laid out as a complete **Agent Skill directory**. Do **not** copy only `SKILL.md`: the root skill intentionally references `runtime/`, `scripts/`, `workflows/`, `templates/`, `schemas/`, `references/`, and the internal initializer under `skills/`.
 
-The easiest installation is therefore to clone the **whole repository** directly into a standard Agent Skills directory.
+The easiest installation is therefore to place the **whole repository** directly into a standard Agent Skills directory. Both installers use Git when available and otherwise download the repository archive themselves; Git is not a prerequisite.
+
+The skill package does not vendor editor binaries. On the first default-auto job it provisions its isolated Python runtime/packages, ffmpeg/ffprobe, and the official `filmcraft-cli` and `effectcraft-cli` releases into job or machine-local state. Crafting Apps archives are checked against the published `SHA256SUMS.txt` and all installed executables are probed before use. Optional transcription dependencies install on first use. Adobe applications are optional fallbacks and retain their normal licensing/sign-in requirements.
 
 ## Recommended: Codex on Windows (user-wide)
 
@@ -118,7 +120,7 @@ A valid package self-test ends with:
 SELFTEST_OK
 ```
 
-If Python is not installed yet, the installer can still place the skill correctly; the autonomous initializer will report missing runtime prerequisites when an edit job actually starts.
+Python does not need to be installed separately. On Windows the autonomous initializer downloads the official signed Python 3.12 runtime into the job when no compatible interpreter exists, then creates an isolated virtual environment.
 
 ## Updating
 
@@ -146,9 +148,9 @@ Remove-Item ".agents\skills\adobe-autonomous-editor" -Recurse -Force
 
 Restart the agent afterwards so its skill catalog refreshes.
 
-## macOS / Linux skill installation
+## macOS / Linux installation
 
-The open Agent Skill itself can be installed into the same user/project directory convention:
+Install into the same user/project directory convention:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/tkgo11/adobe-autonomous-editor/main/install.sh -o /tmp/install-adobe-autonomous-editor.sh
@@ -161,7 +163,7 @@ Project scope:
 bash /tmp/install-adobe-autonomous-editor.sh --project "$PWD"
 ```
 
-The current **desktop execution runtime is Windows-first**, because its deepest fallback uses Windows UI Automation and the bundled bootstrap scripts target Windows Adobe installations. Installing the skill on another OS does not imply feature parity with the Windows runtime.
+The Unix initializer self-provisions Python, runtime packages, ffmpeg/ffprobe, and the Crafting Apps CLIs. macOS additionally supports Premiere/After Effects discovery, UPIA bridge installation, JSX, UXP, System Events Accessibility, keyboard/mouse input, and screenshots. The first Accessibility or Screen Recording use may require the user to grant the operating-system privacy permission. Linux supports the Crafting Apps/media pipeline; Adobe desktop fallback is unavailable because Adobe does not ship those applications for Linux.
 
 ## ChatGPT skill upload
 

@@ -38,8 +38,8 @@ Every workflow module defines:
 2. defaults that may be inferred without asking the user;
 3. media-analysis priorities;
 4. edit-plan rules;
-5. Premiere execution rules;
-6. After Effects escalation rules;
+5. FilmCraft-first editorial execution rules (the module's existing Premiere rules describe equivalent timeline intent when FilmCraft is primary);
+6. EffectCraft-first motion/VFX rules with After Effects escalation only as fallback;
 7. audio/color/graphics behavior;
 8. verification and QC gates;
 9. failure/fallback behavior;

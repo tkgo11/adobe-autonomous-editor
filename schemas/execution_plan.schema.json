@@ -1,85 +1,118 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Autonomous Adobe Execution Plan",
+  "title": "Autonomous Video Editing Execution Plan",
   "type": "object",
-  "required": [
-    "actions"
-  ],
+  "required": ["actions"],
   "properties": {
+    "editorPolicy": {
+      "type": "string",
+      "enum": ["crafting-first", "adobe-only"],
+      "default": "crafting-first"
+    },
     "report": {
       "type": "string"
     },
     "actions": {
       "type": "array",
-      "items": {
-        "type": "object",
-        "required": [
-          "engine"
-        ],
-        "properties": {
-          "engine": {
-            "enum": [
-              "premiere",
-              "after_effects",
-              "desktop",
-              "qc",
-              "shell",
-              "review",
-              "analysis",
-              "transcribe"
-            ]
-          },
-          "op": {
-            "type": "string"
-          },
-          "args": {
-            "type": "object"
-          },
-          "actions": {
-            "type": "array"
-          },
-          "steps": {
-            "type": "array"
-          },
-          "continueOnError": {
-            "type": "boolean"
-          },
-          "timeout": {
-            "type": "number",
-            "exclusiveMinimum": 0
-          },
-          "retries": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 10
-          },
-          "retryDelay": {
-            "type": "number",
-            "minimum": 0
-          },
-          "verify": {
-            "oneOf": [
-              {
-                "type": "object"
-              },
-              {
-                "type": "array",
-                "items": {
-                  "type": "object"
-                }
-              }
-            ]
-          },
-          "fallbacks": {
-            "type": "array",
-            "items": {
-              "type": "object"
+      "items": { "$ref": "#/$defs/action" }
+    }
+  },
+  "$defs": {
+    "action": {
+      "type": "object",
+      "required": ["engine"],
+      "properties": {
+        "engine": {
+          "enum": [
+            "filmcraft",
+            "effectcraft",
+            "premiere",
+            "after_effects",
+            "desktop",
+            "qc",
+            "shell",
+            "review",
+            "analysis",
+            "transcribe"
+          ]
+        },
+        "op": { "type": "string" },
+        "args": { "type": "object" },
+        "argv": {
+          "type": "array",
+          "items": { "type": ["string", "number"] }
+        },
+        "cwd": { "type": "string" },
+        "actions": { "type": "array" },
+        "steps": { "type": "array" },
+        "continueOnError": { "type": "boolean" },
+        "timeout": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "retries": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+        },
+        "retryDelay": {
+          "type": "number",
+          "minimum": 0
+        },
+        "verify": {
+          "oneOf": [
+            { "$ref": "#/$defs/action" },
+            {
+              "type": "array",
+              "items": { "$ref": "#/$defs/action" }
+            }
+          ]
+        },
+        "fallbacks": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/action" },
+          "maxItems": 8
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "engine": { "enum": ["filmcraft", "effectcraft"] }
             },
-            "maxItems": 8
+            "required": ["engine"]
+          },
+          "then": {
+            "required": ["argv"],
+            "properties": {
+              "argv": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": ["string", "number"] }
+              }
+            }
           }
         },
-        "additionalProperties": true
-      }
+        {
+          "if": {
+            "properties": {
+              "engine": { "const": "shell" }
+            },
+            "required": ["engine"]
+          },
+          "then": {
+            "required": ["argv"],
+            "properties": {
+              "argv": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string" }
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": true
     }
   },
   "additionalProperties": false
