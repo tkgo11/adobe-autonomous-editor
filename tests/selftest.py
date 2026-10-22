@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -128,9 +129,11 @@ def main():
     check((ROOT / "scripts/initialize_job.sh").exists(), "Unix initialize wrapper missing")
     windows_initializer = (ROOT / "scripts/initialize_job.ps1").read_text(encoding="utf-8")
     check('if(-not $NoAuto){$initArgs += "--auto"}' in windows_initializer and "$explicit" not in windows_initializer, "PowerShell Crafting switches suppress automatic media provisioning")
+    check('AAE_JOB_ROOT="$JOB_ROOT" exec' in (ROOT / "scripts/run_runtime.sh").read_text(encoding="utf-8"), "Unix runtime wrapper does not provide its trusted job root")
+    check('$env:AAE_JOB_ROOT = $JobRoot' in (ROOT / "scripts/run_runtime.ps1").read_text(encoding="utf-8"), "PowerShell runtime wrapper does not provide its trusted job root")
     windows_provisioner = (ROOT / "scripts/provision_python.ps1").read_text(encoding="utf-8")
     check("function Test-PipVenv" in windows_provisioner and "-m venv" in windows_provisioner and "-m pip --version" in windows_provisioner, "Windows Python compatibility probe does not verify a pip-enabled venv")
-    check("Test-PipVenv -Python $python" in windows_provisioner and "Remove-Item -LiteralPath $target -Recurse -Force" in windows_provisioner, "Windows managed Python reuse does not validate and repair incomplete installations")
+    check("Test-PipVenv -Python $python" in windows_provisioner and "sys.version_info >= (3,10)" in windows_provisioner and "Remove-Item -LiteralPath $target -Recurse -Force" in windows_provisioner, "Windows managed Python reuse does not validate and repair incomplete installations")
     shell_installer = (ROOT / "install.sh").read_text(encoding="utf-8")
     ps_installer = (ROOT / "install.ps1").read_text(encoding="utf-8")
     check("validation_python" in shell_installer and "sys.version_info >= (3,10)" in shell_installer, "Unix installer does not gate validation on Python 3.10+")
@@ -139,6 +142,7 @@ def main():
     check("static-ffmpeg" not in requirements, "unverified macOS ffmpeg dependency must not be installed")
     unix_provisioner = (ROOT / "scripts/provision_python.sh").read_text(encoding="utf-8")
     check(".stage.XXXXXX" in unix_provisioner and 'rm -rf -- "$EXTRACTED"' in unix_provisioner and 'mv "$STAGED" "$EXTRACTED"' in unix_provisioner, "Unix uv extraction is not transactionally recoverable")
+    check('test_pip_venv "$CACHED_PYTHON"' in unix_provisioner and 'python install --reinstall 3.12' in unix_provisioner, "Unix cached Python reuse does not repair incomplete interpreters")
     check(toolchain._btbn_asset() is None or toolchain._btbn_asset().startswith("ffmpeg-master-latest-"), "managed ffmpeg asset selection failed")
     check(toolchain._btbn_asset(system="Linux", machine="x86_64", libc="musl") is None, "musl Linux must not select a glibc BtbN build")
     check(toolchain._static_asset_names("Linux", "x86_64") == ("ffmpeg-linux-x64", "ffprobe-linux-x64"), "musl Linux static ffmpeg assets mismatch")
@@ -158,31 +162,79 @@ def main():
                     fallback_one = initializer.machine_state_dir(None, Path("/jobs/one/job"))
                     fallback_two = initializer.machine_state_dir(None, Path("/other/two/job"))
         check(fallback_one == fallback_two, "machine state fallback differs across job directories")
+        if os.name != "nt":
+            check(fallback_one.stat().st_mode & 0o777 == 0o700, "machine state fallback is not private to the current user")
+        if os.name != "nt":
+            link_temp = Path(state_test_temp) / "link-temp"
+            link_temp.mkdir()
+            planted = link_temp / initializer._fallback_machine_state_dir().name
+            attacker_dir = Path(state_test_temp) / "attacker-state"
+            attacker_dir.mkdir()
+            planted.symlink_to(attacker_dir, target_is_directory=True)
+            with mock.patch.object(initializer.Path, "home", return_value=readonly_home):
+                with mock.patch.object(initializer.tempfile, "gettempdir", return_value=str(link_temp)):
+                    with mock.patch.object(initializer.os, "access", side_effect=lambda path, mode: False if Path(path) == readonly_home / ".adobe-autonomous-editor" else original_access(path, mode)):
+                        try:
+                            initializer.machine_state_dir(None, Path("/jobs/untrusted/job"))
+                        except RuntimeError:
+                            pass
+                        else:
+                            raise AssertionError("pre-planted state-cache symlink was accepted")
     original_path = os.environ.get("PATH", "")
-    try:
-        toolchain.restore_media_path({"tools": {"ffmpeg": sys.executable}})
-        check(str(Path(sys.executable).parent.resolve()) in os.environ["PATH"].split(os.pathsep), "managed tool PATH was not restored")
-    finally:
-        os.environ["PATH"] = original_path
+    toolchain.restore_media_path({"tools": {"ffmpeg": sys.executable}})
+    check(os.environ.get("PATH", "") == original_path, "unvalidated tool environment changed PATH")
 
     with tempfile.TemporaryDirectory() as managed_temp:
         managed_job = Path(managed_temp) / "managed-media-job"
-        managed_bin = managed_job / "managed-bin"
+        state_dir = Path(managed_temp) / "machine-state"
+        state_dir.mkdir()
+        os.chmod(state_dir, 0o700)
+        managed_bin = state_dir / "toolchain/ffmpeg/releases/test/bin"
         managed_bin.mkdir(parents=True)
+        env_tools = {}
+        hashes = {}
         for name in ("ffmpeg", "ffprobe"):
-            executable = managed_bin / name
+            executable = managed_bin / (name + (".exe" if os.name == "nt" else ""))
             executable.write_text("#!/bin/sh\nexit 0\n")
             executable.chmod(0o755)
-        (managed_job / "analysis").mkdir()
+            env_tools[name] = str(executable)
+            hashes[name] = hashlib.sha256(executable.read_bytes()).hexdigest()
+        (state_dir / "toolchain/ffmpeg/manifest.json").write_text(json.dumps({"paths": env_tools, "sha256": hashes}))
+        (managed_job / "plans").mkdir(parents=True)
+        (managed_job / "analysis").mkdir(parents=True)
         managed_environment = managed_job / "analysis/environment.json"
-        managed_environment.write_text(json.dumps({"tools": {"ffmpeg": str(managed_bin / "ffmpeg"), "ffprobe": str(managed_bin / "ffprobe")}}))
+        managed_environment.write_text(json.dumps({"tools": env_tools}))
+        (managed_job / "plans/init_state.json").write_text(json.dumps({"machine_state_dir": str(state_dir)}))
+        source_bundle = Path(managed_temp) / "source-bundle"
+        source_bundle.mkdir()
+        malicious_binary = source_bundle / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+        malicious_binary.write_text("#!/bin/sh\nexit 0\n")
+        malicious_binary.chmod(0o755)
+        (source_bundle / "environment.json").write_text(json.dumps({"tools": {"ffmpeg": str(malicious_binary), "ffprobe": str(malicious_binary)}}))
+        original_job_root = os.environ.get("AAE_JOB_ROOT")
+        original_environment = os.environ.pop("AAE_ENVIRONMENT", None)
         try:
             os.environ["PATH"] = original_path
-            restored = toolchain.restore_job_media_path(None, (managed_job / "analysis/result.json",))
+            os.environ["AAE_JOB_ROOT"] = str(managed_job)
+            restored = toolchain.restore_job_media_path(None, (source_bundle / "media.mov",))
             check(restored == str(managed_environment.resolve()), "standalone command did not discover its job environment")
-            check(str(managed_bin.resolve()) in os.environ["PATH"].split(os.pathsep), "standalone command did not restore managed media tools")
+            check(str(managed_bin.resolve()) in os.environ["PATH"].split(os.pathsep), "standalone command did not restore verified managed media tools")
         finally:
             os.environ["PATH"] = original_path
+            if original_job_root is None:
+                os.environ.pop("AAE_JOB_ROOT", None)
+            else:
+                os.environ["AAE_JOB_ROOT"] = original_job_root
+        try:
+            os.environ.pop("AAE_JOB_ROOT", None)
+            restored_source = toolchain.restore_job_media_path(None, (source_bundle / "media.mov",))
+            check(restored_source is None and os.environ.get("PATH", "") == original_path, "source-adjacent environment file was trusted")
+        finally:
+            os.environ["PATH"] = original_path
+            if original_job_root is not None:
+                os.environ["AAE_JOB_ROOT"] = original_job_root
+            if original_environment is not None:
+                os.environ["AAE_ENVIRONMENT"] = original_environment
 
     original_which = toolchain.shutil.which
     original_probe = toolchain._probe
@@ -266,7 +318,13 @@ def main():
         python_job = td / "python-job"
         managed_python = python_job / "runtime/python-base/current/bin/python3"
         managed_python.parent.mkdir(parents=True)
-        managed_python.write_text("#!/bin/sh\nexit 0\n")
+        managed_python.write_text(
+            "#!/bin/sh\ncase \"$1\" in\n"
+            "-c) exit 0;;\n"
+            "-m) if [ \"$2\" = venv ]; then mkdir -p \"$3/bin\"; cp \"$0\" \"$3/bin/python\"; exit 0; fi; "
+            "if [ \"$2\" = pip ]; then exit 0; fi;;\n"
+            "esac\nexit 1\n"
+        )
         managed_python.chmod(0o755)
         python_probe = subprocess.run(
             ["bash", str(ROOT / "scripts/provision_python.sh"), str(python_job)],
@@ -411,10 +469,22 @@ def main():
 
         if sys.platform != "win32":
             fake_cli = td / "filmcraft-cli"
-            fake_cli.write_text("#!/usr/bin/env python3\nimport json, sys\nprint('filmcraft-cli 9.9.9' if '--version' in sys.argv else json.dumps({'args': sys.argv[1:]}))\n")
+            fake_cli.write_text(
+                "#!/usr/bin/env python3\nimport json, sys\n"
+                "if '--version' in sys.argv: print('filmcraft-cli 9.9.9')\n"
+                "elif sys.argv[1:] == ['commands', '--json']: print(json.dumps({'commands': [{'name': 'edit'}]}))\n"
+                "elif sys.argv[1:] == ['exec', '--list', '--schemas', '--json']: print(json.dumps({'schemas': {'render': {}}}))\n"
+                "else: print(json.dumps({'args': sys.argv[1:]}))\n"
+            )
             fake_cli.chmod(0o755)
             craft_probe = crafting_apps.probe("filmcraft", str(fake_cli))
-            check(craft_probe["available"] and "9.9.9" in craft_probe["version"], "Crafting Apps CLI probe failed")
+            check(craft_probe["available"] and "9.9.9" in craft_probe["version"] and craft_probe["catalog_probe"]["command_count"] == 1, "Crafting Apps CLI/catalog probe failed")
+            effect_probe = crafting_apps.probe("effectcraft", str(fake_cli))
+            check(effect_probe["available"] and effect_probe["catalog_probe"]["args"] == ["exec", "--list", "--schemas", "--json"], "EffectCraft command catalog probe failed")
+            no_catalog = td / "no-catalog-cli"
+            no_catalog.write_text("#!/usr/bin/env python3\nimport sys\nprint('cli 1.0' if '--version' in sys.argv else '[]')\n")
+            no_catalog.chmod(0o755)
+            check(not crafting_apps.probe("filmcraft", str(no_catalog))["available"], "version-only CLI was considered a usable editor")
             craft_run = crafting_apps.run_cli(str(fake_cli), ["inspect", "sequence"])
             check(craft_run["ok"] and craft_run["json"]["args"] == ["inspect", "sequence"], "Crafting Apps CLI invocation failed")
 
@@ -425,7 +495,7 @@ def main():
             new_cli = craft_root / "releases/0.9/bin/filmcraft-cli"
             for path in (old_cli, new_cli):
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("#!/bin/sh\nexit 0\n")
+                path.write_text(fake_cli.read_text(encoding="utf-8"))
                 path.chmod(0o755)
             (craft_root / "install.json").write_text(json.dumps({"path": str(new_cli.resolve())}))
             check(crafting_apps.discover("filmcraft", td / "managed") == str(new_cli.resolve()), "Crafting Apps manifest release was not preferred")

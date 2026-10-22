@@ -12,8 +12,23 @@ PYTHON_ROOT="$RUNTIME_DIR/python-base"
 UV_ROOT="$RUNTIME_DIR/uv-bootstrap"
 mkdir -p "$RUNTIME_DIR"
 
+test_pip_venv() {
+  local resolved="$1" probe_dir probe_python
+  "$resolved" -c 'import sys; assert sys.version_info >= (3,10)' >/dev/null 2>&1 || return 1
+  probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/aae-python-probe.XXXXXX") || return 1
+  if "$resolved" -m venv "$probe_dir/venv" >/dev/null 2>&1; then
+    probe_python="$probe_dir/venv/bin/python"
+    if [[ -x "$probe_python" ]] && "$probe_python" -m pip --version >/dev/null 2>&1; then
+      rm -rf -- "$probe_dir"
+      return 0
+    fi
+  fi
+  rm -rf -- "$probe_dir"
+  return 1
+}
+
 compatible_python() {
-  local candidate resolved probe_dir probe_python
+  local candidate resolved
   for candidate in python3 python; do
     if command -v "$candidate" >/dev/null 2>&1; then
       if resolved=$("$candidate" -c 'import sys; assert sys.version_info >= (3,10); print(sys.executable)' 2>/dev/null); then
@@ -21,16 +36,10 @@ compatible_python() {
         # ensurepip payload into a separate package (for example Debian's
         # python3-venv). Prove that this interpreter can create the pip-enabled
         # environment bootstrap.py will need before accepting it.
-        probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/aae-python-probe.XXXXXX")
-        if "$resolved" -m venv "$probe_dir/venv" >/dev/null 2>&1; then
-          probe_python="$probe_dir/venv/bin/python"
-          if [[ -x "$probe_python" ]] && "$probe_python" -m pip --version >/dev/null 2>&1; then
-            rm -rf -- "$probe_dir"
-            printf '%s\n' "$resolved"
-            return 0
-          fi
+        if test_pip_venv "$resolved"; then
+          printf '%s\n' "$resolved"
+          return 0
         fi
-        rm -rf -- "$probe_dir"
       fi
     fi
   done
@@ -42,9 +51,14 @@ if [[ "${AAE_IGNORE_SYSTEM_PYTHON:-0}" != "1" ]] && PYTHON=$(compatible_python);
   exit 0
 fi
 
-if [[ -x "$PYTHON_ROOT/current/bin/python3" ]]; then
-  printf '%s\n' "$PYTHON_ROOT/current/bin/python3"
-  exit 0
+REINSTALL_PYTHON=0
+CACHED_PYTHON="$PYTHON_ROOT/current/bin/python3"
+if [[ -e "$CACHED_PYTHON" || -L "$CACHED_PYTHON" ]]; then
+  if [[ -x "$CACHED_PYTHON" ]] && test_pip_venv "$CACHED_PYTHON"; then
+    printf '%s\n' "$CACHED_PYTHON"
+    exit 0
+  fi
+  REINSTALL_PYTHON=1
 fi
 
 download() {
@@ -135,11 +149,16 @@ fi
 [[ -x "$UV" ]] || { echo "Verified uv archive did not contain an executable." >&2; exit 1; }
 
 mkdir -p "$PYTHON_ROOT"
-UV_CACHE_DIR="$RUNTIME_DIR/uv-cache" UV_PYTHON_INSTALL_DIR="$PYTHON_ROOT" \
-  "$UV" python install 3.12 --install-dir "$PYTHON_ROOT" --no-bin --quiet
+if [[ "$REINSTALL_PYTHON" == "1" ]]; then
+  UV_CACHE_DIR="$RUNTIME_DIR/uv-cache" UV_PYTHON_INSTALL_DIR="$PYTHON_ROOT" \
+    "$UV" python install --reinstall 3.12 --install-dir "$PYTHON_ROOT" --no-bin --quiet
+else
+  UV_CACHE_DIR="$RUNTIME_DIR/uv-cache" UV_PYTHON_INSTALL_DIR="$PYTHON_ROOT" \
+    "$UV" python install 3.12 --install-dir "$PYTHON_ROOT" --no-bin --quiet
+fi
 PYTHON=$(UV_CACHE_DIR="$RUNTIME_DIR/uv-cache" UV_PYTHON_INSTALL_DIR="$PYTHON_ROOT" \
   "$UV" python find --managed-python 3.12 --no-project)
-[[ -x "$PYTHON" ]] || { echo "uv did not provision a usable Python interpreter." >&2; exit 1; }
+[[ -x "$PYTHON" ]] && test_pip_venv "$PYTHON" || { echo "uv did not provision a usable Python interpreter." >&2; exit 1; }
 mkdir -p "$PYTHON_ROOT/current/bin"
 ln -sfn "$PYTHON" "$PYTHON_ROOT/current/bin/python3"
 printf '%s\n' "$PYTHON"

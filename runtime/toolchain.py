@@ -9,6 +9,7 @@ import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -317,42 +318,91 @@ def ensure_media_tools(state_dir: Path) -> dict:
     return result
 
 
-def restore_media_path(environment: dict) -> None:
-    """Expose managed tools recorded by initialization to later job processes."""
-    tools = environment.get("tools") or {}
-    for key in ("ffmpeg", "ffprobe"):
-        value = tools.get(key)
-        if value and Path(value).exists():
-            _prepend(Path(value).parent)
+def _validated_job_media_paths(environment: dict, job_root: Path) -> dict[str, Path]:
+    """Return only hash-verified binaries from a private machine-state cache."""
+    job_root = Path(job_root).resolve(strict=False)
+    init_path = job_root / "plans/init_state.json"
+    try:
+        init_state = json.loads(init_path.read_text(encoding="utf-8"))
+        recorded_state = Path(init_state["machine_state_dir"]).expanduser()
+        if not recorded_state.is_absolute() or recorded_state.is_symlink():
+            return {}
+        state_dir = recorded_state.resolve(strict=True)
+        if state_dir == job_root or job_root in state_dir.parents:
+            return {}
+        state_info = state_dir.stat()
+        if not stat.S_ISDIR(state_info.st_mode):
+            return {}
+        if hasattr(os, "getuid") and state_info.st_uid != os.getuid():
+            return {}
+        if os.name != "nt" and state_info.st_mode & 0o077:
+            return {}
+        tool_root = state_dir / "toolchain/ffmpeg"
+        manifest_path = tool_root / "manifest.json"
+        if tool_root.is_symlink() or manifest_path.is_symlink():
+            return {}
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        configured = environment.get("tools") or {}
+        paths = manifest["paths"]
+        digests = manifest["sha256"]
+    except (OSError, ValueError, TypeError, KeyError):
+        return {}
+
+    validated: dict[str, Path] = {}
+    for name in ("ffmpeg", "ffprobe"):
+        try:
+            raw = Path(paths[name])
+            if not raw.is_absolute() or raw.is_symlink():
+                return {}
+            binary = raw.resolve(strict=True)
+            if tool_root.resolve() not in binary.parents or not binary.is_file() or not os.access(binary, os.X_OK):
+                return {}
+            if Path(configured[name]).resolve(strict=True) != binary:
+                return {}
+            expected = str(digests[name]).lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", expected) or _sha256(binary) != expected:
+                return {}
+            validated[name] = binary
+        except (OSError, TypeError, KeyError):
+            return {}
+    return validated
+
+
+def restore_media_path(environment: dict, job_root: Path | None = None) -> None:
+    """Expose only hash-verified media binaries from a validated job cache."""
+    if job_root is None:
+        return
+    paths = _validated_job_media_paths(environment, job_root)
+    if len(paths) == 2:
+        _prepend(paths["ffmpeg"].parent)
 
 
 def restore_job_media_path(environment_path=None, anchors=()) -> str | None:
     """Restore managed media tools for a standalone job command.
 
-    Initializers cannot mutate the parent shell's environment.  Standalone
-    analysis/QC commands therefore locate the job's recorded environment from
-    an explicit path, AAE_ENVIRONMENT/AAE_JOB_ROOT, or a nearby input/output
-    path before resolving ffmpeg and ffprobe.
+    Initializers cannot mutate the parent shell's environment. Standalone
+    commands use an explicitly supplied environment, AAE_ENVIRONMENT, or the
+    AAE_JOB_ROOT set by the supported runtime wrappers. Media and output paths
+    are deliberately not searched for environment files.
     """
-    candidates = []
+    candidates: list[tuple[Path, Path]] = []
     if environment_path:
-        candidates.append(Path(environment_path).expanduser())
+        candidate = Path(environment_path).expanduser()
+        if candidate.name == "environment.json" and candidate.parent.name == "analysis":
+            candidates.append((candidate, candidate.parent.parent))
     if os.environ.get("AAE_ENVIRONMENT"):
-        candidates.append(Path(os.environ["AAE_ENVIRONMENT"]).expanduser())
+        candidate = Path(os.environ["AAE_ENVIRONMENT"]).expanduser()
+        if candidate.name == "environment.json" and candidate.parent.name == "analysis":
+            candidates.append((candidate, candidate.parent.parent))
     if os.environ.get("AAE_JOB_ROOT"):
-        candidates.append(Path(os.environ["AAE_JOB_ROOT"]).expanduser() / "analysis/environment.json")
-
-    search_roots = [Path.cwd(), *(Path(anchor).expanduser() for anchor in anchors if anchor)]
-    for root in search_roots:
-        root = root.resolve(strict=False)
-        directory = root if root.is_dir() else root.parent
-        for parent in (directory, *directory.parents):
-            candidates.extend((parent / "environment.json", parent / "analysis/environment.json"))
+        job_root = Path(os.environ["AAE_JOB_ROOT"]).expanduser()
+        candidates.append((job_root / "analysis/environment.json", job_root))
 
     seen = set()
-    for candidate in candidates:
+    for candidate, job_root in candidates:
+        resolved_root = job_root.resolve(strict=False)
         resolved = candidate.resolve(strict=False)
-        if resolved in seen:
+        if resolved in seen or resolved != resolved_root / "analysis/environment.json":
             continue
         seen.add(resolved)
         try:
@@ -360,6 +410,6 @@ def restore_job_media_path(environment_path=None, anchors=()) -> str | None:
         except (OSError, ValueError, TypeError):
             continue
         if isinstance(environment, dict):
-            restore_media_path(environment)
+            restore_media_path(environment, resolved_root)
             return str(resolved)
     return None

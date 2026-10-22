@@ -63,10 +63,10 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--scene-threshold", type=float, default=0.35)
     ap.add_argument("--min-silence", type=float, default=0.5)
-    ap.add_argument("--environment", help="job analysis/environment.json (normally auto-discovered)")
+    ap.add_argument("--environment", help="job analysis/environment.json (required outside the runtime wrapper)")
     ns = ap.parse_args()
     media = Path(ns.media).resolve()
-    restore_job_media_path(ns.environment, (ns.out, media))
+    restore_job_media_path(ns.environment)
     ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
     if not ffmpeg or not ffprobe:
         raise SystemExit("ffmpeg and ffprobe are required")

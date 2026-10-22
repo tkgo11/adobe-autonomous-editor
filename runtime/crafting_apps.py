@@ -207,6 +207,38 @@ def discover(app: str, state_dir: Path | None = None) -> str | None:
     return None
 
 
+def _catalog_probe(app: str, path: str) -> dict:
+    args = ["commands", "--json"] if app == "filmcraft" else ["exec", "--list", "--schemas", "--json"]
+    try:
+        run = subprocess.run([path, *args], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        if run.returncode:
+            return {"ok": False, "args": args, "returncode": run.returncode, "stderr": run.stderr[-4000:]}
+        try:
+            payload = json.loads(run.stdout)
+        except json.JSONDecodeError as exc:
+            return {"ok": False, "args": args, "error": f"catalog was not valid JSON: {exc}", "stdout": run.stdout[-4000:]}
+        catalog = payload
+        while isinstance(catalog, dict):
+            nested_key = next((key for key in ("commands", "schemas", "result") if key in catalog), None)
+            if nested_key:
+                catalog = catalog[nested_key]
+            else:
+                catalog = {key: value for key, value in catalog.items() if key not in {"ok", "success", "version", "error", "description"}}
+                break
+        if isinstance(catalog, list):
+            names = [str(row.get("name") or row.get("command") or row.get("id")) if isinstance(row, dict) else str(row) for row in catalog]
+            count = len(catalog)
+        elif isinstance(catalog, dict):
+            names = list(map(str, catalog.keys()))
+            count = len(catalog)
+        else:
+            names = []
+            count = 0
+        return {"ok": count > 0, "args": args, "command_count": count, "command_names": names[:256]}
+    except Exception as exc:
+        return {"ok": False, "args": args, "error": str(exc)}
+
+
 def probe(app: str, path: str | None) -> dict:
     result = {"app": app, "role": APPS[app]["role"], "path": path, "available": False, "version": None}
     if not path:
@@ -215,12 +247,15 @@ def probe(app: str, path: str | None) -> dict:
     try:
         run = subprocess.run([path, "--version"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
         output = (run.stdout or run.stderr).strip()
+        version_ok = run.returncode == 0 and bool(output)
+        catalog = _catalog_probe(app, path) if version_ok else {"ok": False, "error": "version probe failed"}
         result.update({
-            "available": run.returncode == 0,
+            "available": version_ok and catalog.get("ok", False),
             "returncode": run.returncode,
             "version": output.splitlines()[0] if output else None,
             "stdout": run.stdout[-4000:],
             "stderr": run.stderr[-4000:],
+            "catalog_probe": catalog,
         })
     except Exception as exc:
         result["error"] = str(exc)

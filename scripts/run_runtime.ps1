@@ -10,5 +10,13 @@ if(-not (Test-Path -LiteralPath $python -PathType Leaf)){throw "Job runtime is n
 $relative=if($Command -eq "qc"){"scripts\qc.py"}else{"runtime\$Command.py"}
 $script=Join-Path $SkillRoot $relative
 if(-not (Test-Path -LiteralPath $script -PathType Leaf)){throw "Runtime command not found: $script"}
-& $python $script @Arguments
-exit $LASTEXITCODE
+$previousJobRoot = $env:AAE_JOB_ROOT
+$env:AAE_JOB_ROOT = $JobRoot
+try {
+  & $python $script @Arguments
+  $exitCode = $LASTEXITCODE
+} finally {
+  if($null -eq $previousJobRoot) { Remove-Item Env:AAE_JOB_ROOT -ErrorAction SilentlyContinue }
+  else { $env:AAE_JOB_ROOT = $previousJobRoot }
+}
+exit $exitCode

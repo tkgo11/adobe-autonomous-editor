@@ -7,6 +7,8 @@ function Test-PipVenv {
   param([Parameter(Mandatory=$true)][string]$Python)
   $probe = Join-Path ([System.IO.Path]::GetTempPath()) ("aae-python-probe-" + [guid]::NewGuid().ToString("N"))
   try {
+    & $Python -c "import sys; assert sys.version_info >= (3,10)" *> $null
+    if($LASTEXITCODE -ne 0) { return $false }
     & $Python -m venv $probe *> $null
     $venvCreated = $LASTEXITCODE -eq 0
     $venvPython = Join-Path $probe "Scripts\python.exe"

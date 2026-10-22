@@ -232,7 +232,7 @@ Run follow-on commands through `scripts/run_runtime.ps1` on Windows or `scripts/
 ./scripts/run_runtime.sh "$HOME/EditJobs/job-001" "$HOME/.agents/skills/adobe-autonomous-editor" execute_plan "$HOME/EditJobs/job-001/plans/plan.json" --job-root "$HOME/EditJobs/job-001" --skill-root "$HOME/.agents/skills/adobe-autonomous-editor"
 ```
 
-The same wrappers support `analyze_media`, `transcribe`, `review_packet`, `qc`, and other listed runtime commands. Each stage returns structured success/error data and writes an execution report. If a Crafting Apps action fails and selects a Premiere fallback that was not active during initialization, the executor installs/reuses the packaged bridge, starts the broker, launches Premiere, probes connectivity, and retries the Adobe operation automatically.
+The same wrappers support `analyze_media`, `transcribe`, `review_packet`, `qc`, and other listed runtime commands. They pass the trusted job root so those tools can restore only hash-verified ffmpeg/ffprobe from the private machine cache; media and output folders are never searched for executable paths. When invoking analysis, review-packet, or QC directly instead of through a wrapper, pass `--environment <job>/analysis/environment.json`. Each stage returns structured success/error data and writes an execution report. If a Crafting Apps action fails and selects a Premiere fallback that was not active during initialization, the executor installs/reuses the packaged bridge, starts the broker, launches Premiere, probes connectivity, and retries the Adobe operation automatically.
 
 ## Render verification
 

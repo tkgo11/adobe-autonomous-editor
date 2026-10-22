@@ -23,4 +23,4 @@ if [[ ! -x "$PYTHON" ]]; then
   exit 1
 fi
 [[ -f "$SCRIPT" ]] || { echo "Runtime command not found: $SCRIPT" >&2; exit 1; }
-exec "$PYTHON" "$SCRIPT" "$@"
+AAE_JOB_ROOT="$JOB_ROOT" exec "$PYTHON" "$SCRIPT" "$@"

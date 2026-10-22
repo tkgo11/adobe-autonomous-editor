@@ -15,6 +15,7 @@ import os
 import platform
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -131,15 +132,21 @@ def machine_state_dir(explicit_dir, job: Path):
     cache rather than tying machine-wide state to a particular job directory.
     An explicit directory is never silently replaced.
     """
+    fallback_candidate = None
     if explicit_dir:
         candidates = [Path(explicit_dir).expanduser()]
     else:
+        fallback_candidate = _fallback_machine_state_dir()
         candidates = [
             Path.home() / ".adobe-autonomous-editor",
-            _fallback_machine_state_dir(),
+            fallback_candidate,
         ]
 
     for candidate in candidates:
+        if candidate == fallback_candidate:
+            if _prepare_private_fallback(candidate):
+                return candidate.resolve()
+            continue
         try:
             candidate.mkdir(parents=True, exist_ok=True)
         except OSError:
@@ -160,6 +167,43 @@ def _fallback_machine_state_dir() -> Path:
         import getpass
         identity = "user-" + "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in getpass.getuser())
     return Path(tempfile.gettempdir()) / f"adobe-autonomous-editor-{identity}"
+
+
+def _prepare_private_fallback(path: Path) -> bool:
+    """Create/validate the temp fallback without following a pre-planted link."""
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        pass
+    except OSError:
+        return False
+
+    if os.name == "nt":
+        try:
+            info = path.lstat()
+            reparse = getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            return stat.S_ISDIR(info.st_mode) and not reparse
+        except OSError:
+            return False
+
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        return False
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return False
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            return False
+        os.fchmod(descriptor, 0o700)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(descriptor)
 
 
 def main():

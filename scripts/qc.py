@@ -173,13 +173,13 @@ def main():
     ap.add_argument("--out", default=None)
     ap.add_argument("--spec", help="JSON delivery spec")
     ap.add_argument("--strict", action="store_true", help="fail on detected black/freeze/silence policy violations too")
-    ap.add_argument("--environment", help="job analysis/environment.json (normally auto-discovered)")
+    ap.add_argument("--environment", help="job analysis/environment.json (required outside the runtime wrapper)")
     args = ap.parse_args()
 
     media = Path(args.media).resolve()
     if not media.exists():
         raise SystemExit(f"File not found: {media}")
-    restore_job_media_path(args.environment, (args.out, media))
+    restore_job_media_path(args.environment)
     spec = load_spec(args.spec)
     ffmpeg = require("ffmpeg")
     ffprobe = require("ffprobe")

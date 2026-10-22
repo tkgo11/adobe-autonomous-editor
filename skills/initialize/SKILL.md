@@ -255,7 +255,7 @@ The default editor policy is `crafting-first`. Only the two video-related apps a
 
 Do not install or route work to other Crafting Apps. First search `PATH` and the machine-local state directory. When a required CLI is missing and routine downloads are permitted, run `runtime/crafting_apps.py install`; use only official `storytold/filmcraft` and `storytold/effectcraft` GitHub release assets and require the matching entry in `SHA256SUMS.txt` before extraction. Never execute an unverified download.
 
-Probe each CLI with `--version`. When practical, also query its JSON command catalog (`filmcraft-cli commands --json`; `effectcraft-cli exec --list --schemas --json`) and record feature availability. A binary path alone is not an available capability.
+Probe each CLI with `--version` and its JSON command catalog (`filmcraft-cli commands --json`; `effectcraft-cli exec --list --schemas --json`). A CLI is available only when both probes succeed and the catalog contains at least one command; record the returned command names for routing and feature checks. A binary path or version string alone is not an available editing capability.
 
 Record the routing policy and this strict priority order:
 
