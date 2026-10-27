@@ -427,6 +427,16 @@ At minimum resolve:
 
 Explicit user requirements override module defaults. Infer reasonable unspecified values without blocking the job.
 
+### Supplementary media acquisition
+
+After analyzing the supplied media and brief, decide whether the edit needs specific supporting footage or images (for example, a missing establishing shot, visual explanation, or product context). Prefer the supplied footage when it can tell the story. For each genuine gap, write a short search query, `media_type` (`image` or `video`), and `reason` to `plans/asset_needs.json` as a JSON array. Run:
+
+```text
+python runtime/stock_assets.py --job-root <job> --needs <job>/plans/asset_needs.json
+```
+
+The tool searches Pexels, Pixabay, Wikimedia Commons, and Shutterstock when their credentials are available, downloads up to one suitable asset per gap, and adds downloaded files to `analysis/source_inventory.json`. Commons works without credentials. Inspect each selected asset for visual relevance and technical suitability before using it; refine the query if it is a poor fit. Read `analysis/asset_candidates.json` and `analysis/asset_rights.md`, retain required attribution, and check license scope, releases, and site terms before final export. Shutterstock assets can be downloaded only if the connected account already has a license that permits redownload; otherwise present them as `license_required` candidates and use another source or obtain the necessary license decision. Never use a watermarked preview as final media.
+
 ## 3.5 Phase 3 — Modular editorial plan
 
 Construct a stable-ID edit decision graph. Apply:
