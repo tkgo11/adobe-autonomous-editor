@@ -1,4 +1,4 @@
-websockets>=13,<16
+websockets>=17,<18
 jsonschema>=4.21
 psutil>=5.9
 yt-dlp>=2025.9.26
